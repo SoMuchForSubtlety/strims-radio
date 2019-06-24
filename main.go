@@ -10,24 +10,31 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
-	"golang.org/x/net/context"
-	"golang.org/x/oauth2/google"
+	"google.golang.org/api/googleapi/transport"
 	"google.golang.org/api/youtube/v3"
 )
 
 type bot struct {
-	mu         sync.Mutex
-	authToken  string
-	address    string
-	conn       *websocket.Conn
-	lastPublic time.Time
-	client     *http.Client
-	ytServ     *youtube.Service
+	mu             sync.Mutex
+	authToken      string
+	address        string
+	conn           *websocket.Conn
+	client         *http.Client
+	ytServ         *youtube.Service
+	waitingQueue   queue
+	openDecisions  decisions
+	currentEntry   queueEntry
+	con            config
+	runningCommand *exec.Cmd
+	skipVotes      int
 }
 
 type message struct {
@@ -42,11 +49,34 @@ type contents struct {
 }
 
 type config struct {
-	AuthToken            string `json:"auth_token"`
-	Address              string `json:"address"`
-	CalendarClientID     string `json:"calendar_client_ID"`
-	CalendarClientSecret string `json:"calendar_client_secret"`
+	AuthToken string `json:"auth_token"`
+	Address   string `json:"address"`
+	Ingest    string `json:"ingest"`
+	Key       string `json:"key"`
+	APIKey    string `json:"api_key"`
 }
+
+type video struct {
+	Title string
+	ID    string
+}
+
+type queueEntry struct {
+	Video video
+	User  string
+}
+
+type queue struct {
+	Items []queueEntry
+	sync.Mutex
+}
+
+type decisions struct {
+	requests map[string][]video
+	sync.Mutex
+}
+
+const youtubeURLStart = "https://www.youtube.com/watch?v="
 
 var configFile string
 
@@ -63,40 +93,23 @@ func main() {
 
 	config, err := readConfig()
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("error reading config file: %v", err)
 	}
 
-	bot := newBot(config)
+	bot := newBot(*config)
 	if err = bot.setAddress(config.Address); err != nil {
 		log.Fatal(err)
 	}
+	bot.openDecisions.requests = make(map[string][]video)
 
-	ctx := context.Background()
-
-	b, err := ioutil.ReadFile("client_secret.json")
-	if err != nil {
-		log.Fatalf("Unable to read client secret file: %v", err)
-	}
-
-	// If modifying these scopes, delete your previously saved credentials
-	// at ~/.credentials/youtube-go-quickstart.json
-	ytconfig, err := google.ConfigFromJSON(b, youtube.YoutubeReadonlyScope)
-	if err != nil {
-		log.Fatalf("Unable to parse client secret file to config: %v", err)
-	}
-	bot.client = getClient(ctx, ytconfig)
+	bot.client = &http.Client{Transport: &transport.APIKey{Key: config.APIKey}}
 	ytServ, err := youtube.New(bot.client)
 	handleError(err, "Error creating YouTube client")
 	bot.ytServ = ytServ
-	res, err := bot.ytServ.Search.List("id,snippet").Q("YEE neva lie").MaxResults(5).Type("video").VideoCategoryId("10").Do()
-	for _, item := range res.Items {
-		fmt.Println(item.Snippet.Title)
-		fmt.Printf("https://www.youtube.com/watch?v=%s\n", item.Id.VideoId)
-		fmt.Println("----------------------------------------------------")
-	}
+
+	go bot.play()
 
 	for {
-		bot.lastPublic = time.Now().AddDate(0, 0, -1)
 		log.Println("trying to establish connection")
 		err = bot.connect()
 		if err != nil {
@@ -133,8 +146,8 @@ func readConfig() (*config, error) {
 	return c, err
 }
 
-func newBot(config *config) *bot {
-	return &bot{authToken: ";jwt=" + config.AuthToken}
+func newBot(config config) *bot {
+	return &bot{authToken: ";jwt=" + config.AuthToken, con: config}
 }
 
 func (b *bot) setAddress(url string) error {
@@ -195,14 +208,6 @@ func (b *bot) listen() error {
 							return
 						}
 					}()
-				} else if strings.Contains(m.Contents.Data, "whenis") {
-					go func() {
-						err := b.answer(m.Contents, false)
-						if err != nil {
-							errc <- err
-							return
-						}
-					}()
 				}
 			}
 		}
@@ -229,7 +234,111 @@ func (b *bot) close() error {
 }
 
 func (b *bot) answer(contents *contents, private bool) error {
-	return nil
+	urlType1 := regexp.MustCompile(`https:\/\/www.youtube.com\/watch\?v=[a-zA-Z0-9_-]+`)
+	urlType2 := regexp.MustCompile(`https:\/\/youtu.be\/[a-zA-Z0-9_-]+`)
+	var videoID string
+
+	if i, err := strconv.Atoi(contents.Data); err == nil {
+		return b.selectVideo(i, contents.Nick)
+	} else if contents.Data == "-playing" {
+		return b.sendMsg(fmt.Sprintf("curretly playing: %q requested by %s", b.currentEntry.Video.Title, b.currentEntry.User), contents.Nick)
+	} else if contents.Data == "-next" {
+		next, err := b.waitingQueue.peek()
+		if err != nil {
+			return b.sendMsg("No song queued", contents.Nick)
+		}
+		return b.sendMsg(fmt.Sprintf("up next: %q requested by %s", next.Video.Title, next.User), contents.Nick)
+	} else if contents.Data == "-skiplkjhsdefcdlkjhasdfljhb" {
+		b.skipVotes++
+		if contents.Nick == "SoMuchForSubtlety" {
+			b.skipVotes += 100
+		}
+		if b.skipVotes > len(b.waitingQueue.Items) {
+			if b.runningCommand != nil {
+				b.runningCommand.Process.Kill()
+				b.skipVotes = 0
+			}
+		}
+		return b.sendMsg(fmt.Sprintf("%v/%v votes to skip", b.skipVotes, len(b.waitingQueue.Items)/2), contents.Nick)
+	} else if contents.Data == "-queue" {
+		s1 := fmt.Sprintf("There are currently %v songs in the queue", len(b.waitingQueue.Items))
+		b.sendMsg(s1, contents.Nick)
+	} else if urlType1.Match([]byte(contents.Data)) {
+		videoID = regexp.MustCompile(`v=[a-zA-Z0-9_-]+`).FindString(contents.Data)[2:]
+	} else if urlType2.Match([]byte(contents.Data)) {
+		videoID = regexp.MustCompile(`.be\/[a-zA-Z0-9_-]+`).FindString(contents.Data)[4:]
+	}
+
+	if videoID == "" {
+		return b.sendMsg("invalid url", contents.Nick)
+	}
+
+	res, err := b.ytServ.Videos.List("id,snippet,contentDetails").Id(videoID).Do()
+	if err != nil {
+		log.Printf("encoutered error: %v", err)
+		return b.sendMsg("there was an error", contents.Nick)
+	} else if len(res.Items) < 1 {
+		return b.sendMsg("invalid url", contents.Nick)
+	} else if duration, _ := time.ParseDuration(strings.ToLower(res.Items[0].ContentDetails.Duration[2:])); duration.Minutes() >= 10 {
+		return b.sendMsg("This song is too long, please keep it under 10 minutes", contents.Nick)
+	} else {
+		fmt.Println(duration)
+		fmt.Println(res.Items[0].ContentDetails.Duration)
+	}
+
+	v := video{Title: res.Items[0].Snippet.Title, ID: res.Items[0].Id}
+	entry := queueEntry{Video: v, User: contents.Nick}
+	return b.push(entry)
+}
+
+func (b *bot) selectVideo(i int, nick string) error {
+	b.openDecisions.Lock()
+	defer b.openDecisions.Unlock()
+	videos := b.openDecisions.requests[nick]
+	if videos == nil {
+		return b.sendMsg("no open video selection", nick)
+	} else if i > len(videos) || i < 0 {
+		return b.sendMsg("selection out of range", nick)
+	}
+	b.openDecisions.requests[nick] = nil
+
+	entry := queueEntry{Video: videos[i], User: nick}
+	b.push(entry)
+	return b.sendMsg(fmt.Sprintf("selected (%v) %q", i, videos[i].Title), nick)
+}
+
+func (b *bot) push(newEntry queueEntry) error {
+	b.waitingQueue.Lock()
+	defer b.waitingQueue.Unlock()
+	for i, entry := range b.waitingQueue.Items {
+		if entry.User == newEntry.User {
+			b.waitingQueue.Items[i] = newEntry
+			return b.sendMsg("Replaced your previous selection", newEntry.User)
+		}
+	}
+	b.waitingQueue.Items = append(b.waitingQueue.Items, newEntry)
+	return b.sendMsg("added your request to the queue", newEntry.User)
+}
+
+func (q *queue) pop() (queueEntry, error) {
+	q.Lock()
+	defer q.Unlock()
+	if len(q.Items) < 1 {
+		return queueEntry{}, errors.New("can't pop from empty queue")
+	}
+	entry := q.Items[0]
+	q.Items = q.Items[1:]
+	return entry, nil
+}
+
+func (q *queue) peek() (queueEntry, error) {
+	q.Lock()
+	defer q.Unlock()
+	if len(q.Items) < 1 {
+		return queueEntry{}, errors.New("can't pop from empty queue")
+	}
+	entry := q.Items[0]
+	return entry, nil
 }
 
 func parseMessage(msg []byte) (*message, error) {
@@ -268,7 +377,7 @@ func (b *bot) multiSendMsg(messages []string, nick string) error {
 func (b *bot) sendMsg(message string, nick string) error {
 	cont := contents{Nick: nick, Data: message}
 	messageS, _ := json.Marshal(cont)
-	log.Printf("sending private response: %q", message)
+	log.Printf("sending private response to [%v]: %q", nick, messageS)
 	// TODO: properly marshal message as json
 	err := b.conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`PRIVMSG %s`, messageS)))
 	if err != nil {
@@ -283,4 +392,33 @@ func (b *bot) replyHelp(nick string) error {
 		"placeholder 2",
 	}
 	return b.multiSendMsg(responses, nick)
+}
+
+func (b *bot) play() {
+	for {
+		entry, err := b.waitingQueue.pop()
+		if err != nil {
+			fmt.Println("nothing in the queue")
+			// TODO: not ideal, maybe have a backup playlist
+			time.Sleep(time.Second * 5)
+			continue
+		}
+		b.currentEntry = entry
+		b.sendMsg("Playing your song now", b.currentEntry.User)
+		command := exec.Command("youtube-dl", "-f", "bestaudio", "-g", youtubeURLStart+b.currentEntry.Video.ID)
+		url, err := command.Output()
+		if err != nil {
+			log.Printf("encountered error trying to get url from youtube-dl: %v", err)
+			continue
+		}
+		urlProper := strings.TrimSpace(string(url))
+		command = exec.Command("ffmpeg", "-reconnect", "1", "-reconnect_at_eof", "1", "-reconnect_delay_max", "3", "-re", "-i", urlProper, "-codec:a", "aac", "-f", "flv", b.con.Ingest+b.con.Key)
+		log.Printf("Now Playing %s's request: %s", b.currentEntry.User, b.currentEntry.Video.Title)
+		b.runningCommand = command
+		err = command.Run()
+		b.runningCommand = nil
+		if err != nil {
+			log.Printf("encountered error trying to play with ffmpeg: %v", err)
+		}
+	}
 }
