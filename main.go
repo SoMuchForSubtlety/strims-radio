@@ -30,7 +30,6 @@ type bot struct {
 	client         *http.Client
 	ytServ         *youtube.Service
 	waitingQueue   queue
-	openDecisions  decisions
 	currentEntry   queueEntry
 	con            config
 	runningCommand *exec.Cmd
@@ -75,11 +74,6 @@ type queue struct {
 	sync.Mutex
 }
 
-type decisions struct {
-	requests map[string][]video
-	sync.Mutex
-}
-
 const youtubeURLStart = "https://www.youtube.com/watch?v="
 
 var configFile string
@@ -105,11 +99,24 @@ func main() {
 		log.Fatal(err)
 	}
 	bot.msgSenderChan = make(chan contents, 100)
-	bot.openDecisions.requests = make(map[string][]video)
+
+	file, err := ioutil.ReadFile("queue.json")
+	if err != nil {
+		fmt.Printf("no previous playlist found: %v", err)
+	} else {
+		err = json.Unmarshal([]byte(file), &bot.waitingQueue)
+		if err != nil {
+			fmt.Printf("error trying to unmarshal queue: %v", err)
+		} else {
+			log.Printf("loaded playlist with %v songs", len(bot.waitingQueue.Items))
+		}
+	}
 
 	bot.client = &http.Client{Transport: &transport.APIKey{Key: config.APIKey}}
 	ytServ, err := youtube.New(bot.client)
-	handleError(err, "Error creating YouTube client")
+	if err != nil {
+		log.Fatalf("error creating client: %v", err)
+	}
 	bot.ytServ = ytServ
 
 	go bot.play()
@@ -257,16 +264,13 @@ func (b *bot) answer(contents *contents, private bool) {
 		return
 	} else if contents.Data == "-skiplkjhsdefcdlkjhasdfljhb" {
 		b.skipVotes++
-		if contents.Nick == "SoMuchForSubtlety" {
-			b.skipVotes += 100
-		}
 		if b.skipVotes > len(b.waitingQueue.Items) {
 			if b.runningCommand != nil {
 				b.runningCommand.Process.Kill()
-				b.skipVotes = 0
 			}
+			b.skipVotes = 0
 		}
-		b.sendMsg(fmt.Sprintf("%v/%v votes to skip", b.skipVotes, len(b.waitingQueue.Items)/2), contents.Nick)
+		b.sendMsg(fmt.Sprintf("%v/%v votes to skip", b.skipVotes, len(b.waitingQueue.Items)), contents.Nick)
 		return
 	} else if contents.Data == "-queue" {
 		s1 := fmt.Sprintf("There are currently %v songs in the queue", len(b.waitingQueue.Items))
@@ -311,7 +315,7 @@ func (b *bot) answer(contents *contents, private bool) {
 }
 
 func (b *bot) push(newEntry queueEntry) {
-	log.Printf("adding %q for [%v]", newEntry.Video.Title, newEntry.User)
+	log.Printf("adding '%s' for [%v]", newEntry.Video.Title, newEntry.User)
 	b.waitingQueue.Lock()
 	defer b.waitingQueue.Unlock()
 	for i, entry := range b.waitingQueue.Items {
@@ -323,6 +327,7 @@ func (b *bot) push(newEntry queueEntry) {
 	}
 	b.waitingQueue.Items = append(b.waitingQueue.Items, newEntry)
 	b.sendMsg("added your request to the queue", newEntry.User)
+	b.savePlaylist()
 	return
 }
 
@@ -373,7 +378,6 @@ func (b *bot) play() {
 	for {
 		entry, err := b.waitingQueue.pop()
 		if err != nil {
-			fmt.Println("nothing in the queue")
 			// TODO: not ideal, maybe have a backup playlist
 			time.Sleep(time.Second * 5)
 			continue
@@ -391,11 +395,16 @@ func (b *bot) play() {
 		command = exec.Command("ffmpeg", "-reconnect", "1", "-reconnect_at_eof", "1", "-reconnect_delay_max", "3", "-re", "-i", urlProper, "-codec:a", "aac", "-f", "flv", b.con.Ingest+b.con.Key)
 		log.Printf("Now Playing %s's request: %s", b.currentEntry.User, b.currentEntry.Video.Title)
 		b.runningCommand = command
-		err = command.Run()
-		b.runningCommand = nil
+		err = command.Start()
 		if err != nil {
 			log.Printf("encountered error trying to play with ffmpeg: %v", err)
 		}
+		err = command.Wait()
+		if err != nil {
+			log.Printf("Command aborted or errored %v", err)
+		}
+		b.savePlaylist()
+		b.runningCommand = nil
 	}
 }
 
@@ -407,7 +416,7 @@ func (b *bot) messageSender() {
 	for {
 		cont := <-b.msgSenderChan
 		messageS, _ := json.Marshal(cont)
-		log.Printf("sending private response to [%v]: %q", cont.Nick, cont.Data)
+		log.Printf("sending private response to [%v]: '%s'", cont.Nick, cont.Data)
 		// TODO: properly marshal message as json
 		err := b.conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`PRIVMSG %s`, messageS)))
 		if err != nil {
@@ -479,4 +488,16 @@ func durationBar(width int, fraction time.Duration, total time.Duration) string 
 	}
 
 	return replaceAtIndex(base, '⚫', newpos)
+}
+
+func (b *bot) savePlaylist() error {
+	file, err := json.MarshalIndent(&b.waitingQueue, "", "	")
+	if err != nil {
+		return err
+	}
+	err = ioutil.WriteFile("queue.json", file, 0644)
+	if err != nil {
+		return err
+	}
+	return nil
 }
