@@ -12,10 +12,10 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 	"google.golang.org/api/googleapi/transport"
@@ -35,6 +35,9 @@ type bot struct {
 	con            config
 	runningCommand *exec.Cmd
 	skipVotes      int
+	msgSenderChan  chan contents
+	errorChan      chan error
+	songStarted    time.Time
 }
 
 type message struct {
@@ -57,8 +60,9 @@ type config struct {
 }
 
 type video struct {
-	Title string
-	ID    string
+	Title    string
+	ID       string
+	Duration time.Duration
 }
 
 type queueEntry struct {
@@ -100,6 +104,7 @@ func main() {
 	if err = bot.setAddress(config.Address); err != nil {
 		log.Fatal(err)
 	}
+	bot.msgSenderChan = make(chan contents, 100)
 	bot.openDecisions.requests = make(map[string][]video)
 
 	bot.client = &http.Client{Transport: &transport.APIKey{Key: config.APIKey}}
@@ -177,6 +182,7 @@ func (b *bot) connect() error {
 
 	b.conn = conn
 
+	go b.messageSender()
 	err = b.listen()
 	if err != nil {
 		return err
@@ -185,12 +191,11 @@ func (b *bot) connect() error {
 }
 
 func (b *bot) listen() error {
-	errc := make(chan error)
 	go func() {
 		for {
 			_, message, err := b.conn.ReadMessage()
 			if err != nil {
-				errc <- fmt.Errorf("error trying to read message: %v", err)
+				b.errorChan <- fmt.Errorf("error trying to read message: %v", err)
 				return
 			}
 			m, err := parseMessage(message)
@@ -202,17 +207,13 @@ func (b *bot) listen() error {
 			if m.Contents != nil {
 				if m.Type == "PRIVMSG" {
 					go func() {
-						err := b.answer(m.Contents, true)
-						if err != nil {
-							errc <- err
-							return
-						}
+						b.answer(m.Contents, true)
 					}()
 				}
 			}
 		}
 	}()
-	err := <-errc
+	err := <-b.errorChan
 	return err
 }
 
@@ -233,21 +234,27 @@ func (b *bot) close() error {
 	return nil
 }
 
-func (b *bot) answer(contents *contents, private bool) error {
+func (b *bot) answer(contents *contents, private bool) {
 	urlType1 := regexp.MustCompile(`https:\/\/www.youtube.com\/watch\?v=[a-zA-Z0-9_-]+`)
 	urlType2 := regexp.MustCompile(`https:\/\/youtu.be\/[a-zA-Z0-9_-]+`)
 	var videoID string
+	var duration time.Duration
 
-	if i, err := strconv.Atoi(contents.Data); err == nil {
-		return b.selectVideo(i, contents.Nick)
-	} else if contents.Data == "-playing" {
-		return b.sendMsg(fmt.Sprintf("curretly playing: %q requested by %s", b.currentEntry.Video.Title, b.currentEntry.User), contents.Nick)
+	if contents.Data == "-playing" {
+		elapsed := time.Since(b.songStarted)
+
+		response := fmt.Sprintf("`%v` `%v/%v` curretly playing: %q requested by %s", durationBar(15, elapsed, b.currentEntry.Video.Duration), fmtDuration(elapsed), fmtDuration(b.currentEntry.Video.Duration), b.currentEntry.Video.Title, b.currentEntry.User)
+
+		b.sendMsg(response, contents.Nick)
+		return
 	} else if contents.Data == "-next" {
 		next, err := b.waitingQueue.peek()
 		if err != nil {
-			return b.sendMsg("No song queued", contents.Nick)
+			b.sendMsg("No song queued", contents.Nick)
+			return
 		}
-		return b.sendMsg(fmt.Sprintf("up next: %q requested by %s", next.Video.Title, next.User), contents.Nick)
+		b.sendMsg(fmt.Sprintf("up next: %q requested by %s", next.Video.Title, next.User), contents.Nick)
+		return
 	} else if contents.Data == "-skiplkjhsdefcdlkjhasdfljhb" {
 		b.skipVotes++
 		if contents.Nick == "SoMuchForSubtlety" {
@@ -259,10 +266,21 @@ func (b *bot) answer(contents *contents, private bool) error {
 				b.skipVotes = 0
 			}
 		}
-		return b.sendMsg(fmt.Sprintf("%v/%v votes to skip", b.skipVotes, len(b.waitingQueue.Items)/2), contents.Nick)
+		b.sendMsg(fmt.Sprintf("%v/%v votes to skip", b.skipVotes, len(b.waitingQueue.Items)/2), contents.Nick)
+		return
 	} else if contents.Data == "-queue" {
 		s1 := fmt.Sprintf("There are currently %v songs in the queue", len(b.waitingQueue.Items))
+		usepos := b.getUserPosition(contents.Nick)
+		if usepos >= 0 {
+			s1 += fmt.Sprintf(", you are at position %v", usepos+1)
+			d, err := b.durationUntilUser(contents.Nick)
+			if err == nil {
+				s1 += fmt.Sprintf(" and your song will play in %v", fmtDuration(d))
+			}
+		}
+
 		b.sendMsg(s1, contents.Nick)
+		return
 	} else if urlType1.Match([]byte(contents.Data)) {
 		videoID = regexp.MustCompile(`v=[a-zA-Z0-9_-]+`).FindString(contents.Data)[2:]
 	} else if urlType2.Match([]byte(contents.Data)) {
@@ -270,54 +288,42 @@ func (b *bot) answer(contents *contents, private bool) error {
 	}
 
 	if videoID == "" {
-		return b.sendMsg("invalid url", contents.Nick)
+		b.sendMsg("invalid url", contents.Nick)
+		return
 	}
 
 	res, err := b.ytServ.Videos.List("id,snippet,contentDetails").Id(videoID).Do()
 	if err != nil {
 		log.Printf("encoutered error: %v", err)
-		return b.sendMsg("there was an error", contents.Nick)
+		b.sendMsg("there was an error", contents.Nick)
+		return
 	} else if len(res.Items) < 1 {
-		return b.sendMsg("invalid url", contents.Nick)
-	} else if duration, _ := time.ParseDuration(strings.ToLower(res.Items[0].ContentDetails.Duration[2:])); duration.Minutes() >= 10 {
-		return b.sendMsg("This song is too long, please keep it under 10 minutes", contents.Nick)
-	} else {
-		fmt.Println(duration)
-		fmt.Println(res.Items[0].ContentDetails.Duration)
+		b.sendMsg("invalid url", contents.Nick)
+		return
+	} else if duration, _ = time.ParseDuration(strings.ToLower(res.Items[0].ContentDetails.Duration[2:])); duration.Minutes() >= 10 {
+		b.sendMsg("This song is too long, please keep it under 10 minutes", contents.Nick)
+		return
 	}
 
-	v := video{Title: res.Items[0].Snippet.Title, ID: res.Items[0].Id}
+	v := video{Title: res.Items[0].Snippet.Title, ID: res.Items[0].Id, Duration: duration}
 	entry := queueEntry{Video: v, User: contents.Nick}
-	return b.push(entry)
-}
-
-func (b *bot) selectVideo(i int, nick string) error {
-	b.openDecisions.Lock()
-	defer b.openDecisions.Unlock()
-	videos := b.openDecisions.requests[nick]
-	if videos == nil {
-		return b.sendMsg("no open video selection", nick)
-	} else if i > len(videos) || i < 0 {
-		return b.sendMsg("selection out of range", nick)
-	}
-	b.openDecisions.requests[nick] = nil
-
-	entry := queueEntry{Video: videos[i], User: nick}
 	b.push(entry)
-	return b.sendMsg(fmt.Sprintf("selected (%v) %q", i, videos[i].Title), nick)
 }
 
-func (b *bot) push(newEntry queueEntry) error {
+func (b *bot) push(newEntry queueEntry) {
+	log.Printf("adding %q for [%v]", newEntry.Video.Title, newEntry.User)
 	b.waitingQueue.Lock()
 	defer b.waitingQueue.Unlock()
 	for i, entry := range b.waitingQueue.Items {
 		if entry.User == newEntry.User {
 			b.waitingQueue.Items[i] = newEntry
-			return b.sendMsg("Replaced your previous selection", newEntry.User)
+			b.sendMsg("Replaced your previous selection", newEntry.User)
+			return
 		}
 	}
 	b.waitingQueue.Items = append(b.waitingQueue.Items, newEntry)
-	return b.sendMsg("added your request to the queue", newEntry.User)
+	b.sendMsg("added your request to the queue", newEntry.User)
+	return
 }
 
 func (q *queue) pop() (queueEntry, error) {
@@ -363,37 +369,6 @@ func init() {
 	flag.StringVar(&configFile, "config", "config.json", "location of config")
 }
 
-func (b *bot) multiSendMsg(messages []string, nick string) error {
-	for _, message := range messages {
-		err := b.sendMsg(message, nick)
-		if err != nil {
-			return err
-		}
-		time.Sleep(time.Millisecond * 500)
-	}
-	return nil
-}
-
-func (b *bot) sendMsg(message string, nick string) error {
-	cont := contents{Nick: nick, Data: message}
-	messageS, _ := json.Marshal(cont)
-	log.Printf("sending private response to [%v]: %q", nick, messageS)
-	// TODO: properly marshal message as json
-	err := b.conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`PRIVMSG %s`, messageS)))
-	if err != nil {
-		log.Printf(err.Error())
-	}
-	return err
-}
-
-func (b *bot) replyHelp(nick string) error {
-	responses := []string{
-		"placeholder",
-		"placeholder 2",
-	}
-	return b.multiSendMsg(responses, nick)
-}
-
 func (b *bot) play() {
 	for {
 		entry, err := b.waitingQueue.pop()
@@ -412,6 +387,7 @@ func (b *bot) play() {
 			continue
 		}
 		urlProper := strings.TrimSpace(string(url))
+		b.songStarted = time.Now()
 		command = exec.Command("ffmpeg", "-reconnect", "1", "-reconnect_at_eof", "1", "-reconnect_delay_max", "3", "-re", "-i", urlProper, "-codec:a", "aac", "-f", "flv", b.con.Ingest+b.con.Key)
 		log.Printf("Now Playing %s's request: %s", b.currentEntry.User, b.currentEntry.Video.Title)
 		b.runningCommand = command
@@ -421,4 +397,86 @@ func (b *bot) play() {
 			log.Printf("encountered error trying to play with ffmpeg: %v", err)
 		}
 	}
+}
+
+func (b *bot) sendMsg(message string, nick string) {
+	b.msgSenderChan <- contents{Nick: nick, Data: message}
+}
+
+func (b *bot) messageSender() {
+	for {
+		cont := <-b.msgSenderChan
+		messageS, _ := json.Marshal(cont)
+		log.Printf("sending private response to [%v]: %q", cont.Nick, cont.Data)
+		// TODO: properly marshal message as json
+		err := b.conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`PRIVMSG %s`, messageS)))
+		if err != nil {
+			log.Printf(err.Error())
+			b.errorChan <- err
+			return
+		}
+		time.Sleep(time.Millisecond * 350)
+	}
+}
+
+func (b *bot) getUserPosition(nick string) int {
+	b.waitingQueue.Lock()
+	defer b.waitingQueue.Unlock()
+	for i, content := range b.waitingQueue.Items {
+		if content.User == nick {
+			return i
+		}
+	}
+	return -1
+}
+
+func (b *bot) durationUntilUser(nick string) (time.Duration, error) {
+	var dur time.Duration
+	b.waitingQueue.Lock()
+	defer b.waitingQueue.Unlock()
+	for _, content := range b.waitingQueue.Items {
+		if content.User != nick {
+			dur += content.Video.Duration
+		} else {
+			currentRemaining := b.currentEntry.Video.Duration - time.Since(b.songStarted)
+			return dur + currentRemaining, nil
+		}
+	}
+	return dur, errors.New("user is not in queue")
+}
+
+func replaceAtIndex(in string, r rune, i int) string {
+	out := ""
+	j := 0
+	for _, c := range in {
+		if j != i {
+			out += string(c)
+		} else {
+			out += string(r)
+		}
+		j++
+	}
+	return out
+}
+
+func fmtDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+	minutes := d / time.Minute
+	d -= minutes * time.Minute
+	seconds := d / time.Second
+	return fmt.Sprintf("%02d:%02d", minutes, seconds)
+}
+
+func durationBar(width int, fraction time.Duration, total time.Duration) string {
+	base := strings.Repeat("—", width)
+	pos := float64(fraction.Seconds() / total.Seconds())
+
+	newpos := int(float64(utf8.RuneCountInString(base))*pos) - 1
+	if newpos < 0 {
+		newpos = 0
+	} else if newpos >= utf8.RuneCountInString(base) {
+		newpos = utf8.RuneCountInString(base) - 1
+	}
+
+	return replaceAtIndex(base, '⚫', newpos)
 }
