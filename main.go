@@ -37,6 +37,7 @@ type bot struct {
 	msgSenderChan  chan contents
 	errorChan      chan error
 	songStarted    time.Time
+	skipUsers      []string
 }
 
 type message struct {
@@ -246,6 +247,7 @@ func (b *bot) answer(contents *contents, private bool) {
 	urlType2 := regexp.MustCompile(`https:\/\/youtu.be\/[a-zA-Z0-9_-]+`)
 	var videoID string
 	var duration time.Duration
+	contents.Data = strings.TrimSpace(contents.Data)
 
 	if contents.Data == "-playing" {
 		elapsed := time.Since(b.songStarted)
@@ -263,25 +265,24 @@ func (b *bot) answer(contents *contents, private bool) {
 		b.sendMsg(fmt.Sprintf("up next: %q requested by %s", next.Video.Title, next.User), contents.Nick)
 		return
 	} else if contents.Data == "-skiplkjhsdefcdlkjhasdfljhb" {
+		for _, user := range b.skipUsers {
+			if user == contents.Nick {
+				return
+			}
+		}
+		b.skipUsers = append(b.skipUsers, contents.Nick)
 		b.skipVotes++
 		if b.skipVotes > len(b.waitingQueue.Items) {
 			if b.runningCommand != nil {
 				b.runningCommand.Process.Kill()
 			}
+			b.skipUsers = nil
 			b.skipVotes = 0
 		}
 		b.sendMsg(fmt.Sprintf("%v/%v votes to skip", b.skipVotes, len(b.waitingQueue.Items)), contents.Nick)
 		return
 	} else if contents.Data == "-queue" {
-		s1 := fmt.Sprintf("There are currently %v songs in the queue", len(b.waitingQueue.Items))
-		usepos := b.getUserPosition(contents.Nick)
-		if usepos >= 0 {
-			s1 += fmt.Sprintf(", you are at position %v", usepos+1)
-			d, err := b.durationUntilUser(contents.Nick)
-			if err == nil {
-				s1 += fmt.Sprintf(" and your song will play in %v", fmtDuration(d))
-			}
-		}
+		s1 := b.queuePositionMessage(contents.Nick)
 
 		b.sendMsg(s1, contents.Nick)
 		return
@@ -315,20 +316,20 @@ func (b *bot) answer(contents *contents, private bool) {
 }
 
 func (b *bot) push(newEntry queueEntry) {
+	defer b.savePlaylist()
 	log.Printf("adding '%s' for [%v]", newEntry.Video.Title, newEntry.User)
 	b.waitingQueue.Lock()
-	defer b.waitingQueue.Unlock()
 	for i, entry := range b.waitingQueue.Items {
 		if entry.User == newEntry.User {
 			b.waitingQueue.Items[i] = newEntry
-			b.sendMsg("Replaced your previous selection", newEntry.User)
+			b.waitingQueue.Unlock()
+			b.sendMsg(fmt.Sprintf("Replaced your previous selection. %v", b.queuePositionMessage(newEntry.User)), newEntry.User)
 			return
 		}
 	}
 	b.waitingQueue.Items = append(b.waitingQueue.Items, newEntry)
-	b.sendMsg("added your request to the queue", newEntry.User)
-	b.savePlaylist()
-	return
+	b.waitingQueue.Unlock()
+	b.sendMsg(fmt.Sprintf("Added your request to the queue. %v", b.queuePositionMessage(newEntry.User)), newEntry.User)
 }
 
 func (q *queue) pop() (queueEntry, error) {
@@ -429,8 +430,6 @@ func (b *bot) messageSender() {
 }
 
 func (b *bot) getUserPosition(nick string) int {
-	b.waitingQueue.Lock()
-	defer b.waitingQueue.Unlock()
 	for i, content := range b.waitingQueue.Items {
 		if content.User == nick {
 			return i
@@ -500,4 +499,17 @@ func (b *bot) savePlaylist() error {
 		return err
 	}
 	return nil
+}
+
+func (b *bot) queuePositionMessage(nick string) string {
+	s1 := fmt.Sprintf("There are currently %v songs in the queue", len(b.waitingQueue.Items))
+	usepos := b.getUserPosition(nick)
+	if usepos >= 0 {
+		s1 += fmt.Sprintf(", you are at position %v", usepos+1)
+		d, err := b.durationUntilUser(nick)
+		if err == nil {
+			s1 += fmt.Sprintf(" and your song will play in %v", fmtDuration(d))
+		}
+	}
+	return s1
 }
