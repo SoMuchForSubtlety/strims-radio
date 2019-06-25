@@ -3,6 +3,12 @@ cloud.google.com/go v0.34.0/go.mod h1:aQUYkXzVsufM+DwF1aE+0xfcU+56JwCaLick0ClmMT
 cloud.google.com/go v0.38.0 h1:ROfEUZz+Gh5pa62DJWXSaonyu3StP6EA6lPEXPI6mCo=
 cloud.google.com/go v0.38.0/go.mod h1:990N+gfupTy94rShfmMCWGDn0LpTmnzTp2qbd1dvSRU=
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
+github.com/Ronmi/pastebin v0.0.0-20180209215645-c677cc16dbd7 h1:OFiiu7rGBLZBQSLlUzLOdqPbtlMP7tuScr5Y8rXWS4E=
+github.com/Ronmi/pastebin v0.0.0-20180209215645-c677cc16dbd7/go.mod h1:KOzQBAlu93j1pK3BaEP/nUpqwyYAlgK0NtER15bN0iI=
+github.com/SoMuchForSubtlety/fileupload v0.0.0-20190501234410-5cee83efce0d h1:w/YIAuoJkAGoyh4ObM82R3ijgpZ9yN0J9V/bblJpugM=
+github.com/SoMuchForSubtlety/fileupload v0.0.0-20190501234410-5cee83efce0d/go.mod h1:V9UyAKunuViDBcrQDqXsrJ9V1/ZuGMyxSLqiNI/iU34=
+github.com/Syfaro/haste-client v0.0.0-20150731062254-09b1fbfa3977 h1:TNSlqenJvcSPpBafY50g0RD/eVrIUj2i6BTIiRqM9y0=
+github.com/Syfaro/haste-client v0.0.0-20150731062254-09b1fbfa3977/go.mod h1:+XuCpHuIAbb/5Z9KW7rOZ5N85++Yck9u+VkrzE4GA6w=
 github.com/client9/misspell v0.3.4/go.mod h1:qj6jICC3Q7zFZvVWo7KLAzC3yx5G7kyvSDkc90ppPyw=
 github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b/go.mod h1:SBH7ygxi8pfUlaOkMMuAQtPIUF8ecWP5IEl/CR7VP2Q=
 github.com/golang/mock v1.1.1/go.mod h1:oTYuIxOrZwtPieC+H1uAHpcLFnEyAGVDL/k47Jfbm0A=
@@ -22,6 +28,8 @@ github.com/hashicorp/golang-lru v0.5.0/go.mod h1:/m3WP610KZHVQ1SGc6re/UDhFvYD7pJ
 github.com/hashicorp/golang-lru v0.5.1 h1:0hERBMJE1eitiLkihrMvRVBYAkpHzc/J3QdDN+dAcgU=
 github.com/hashicorp/golang-lru v0.5.1/go.mod h1:/m3WP610KZHVQ1SGc6re/UDhFvYD7pJ4Ao+sR/qLZy8=
 github.com/jstemmer/go-junit-report v0.0.0-20190106144839-af01ea7f8024/go.mod h1:6v2b51hI/fHJwM22ozAgKL4VKDeJcHhJFhtBdhmNjmU=
+github.com/syfaro/haste-client v0.0.0-20150731062254-09b1fbfa3977 h1:q4zsfToRKReODIv51dXoT7YSi/DYl+xZcPvebFnRbgg=
+github.com/syfaro/haste-client v0.0.0-20150731062254-09b1fbfa3977/go.mod h1:Z8f/FggiNbik6JGd2arZKiv3Y0BOfGiA2kpi8QJsZDI=
 go.opencensus.io v0.21.0 h1:mU6zScU4U1YAFPHEHYk+3JC4SY7JxgkqS10ZOSyksNg=
 go.opencensus.io v0.21.0/go.mod h1:mSImk1erAIZhrmZN+AvHh14ztQfjbGwt4TtuofqLduU=
 golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2/go.mod h1:djNgcEr1/C05ACkg1iLfiJU5Ep61QUkGW8qpdssI0+w=
