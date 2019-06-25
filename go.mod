@@ -10,5 +10,6 @@ require (
 	github.com/syfaro/haste-client v0.0.0-20150731062254-09b1fbfa3977 // indirect
 	golang.org/x/net v0.0.0-20190620200207-3b0461eec859
 	golang.org/x/oauth2 v0.0.0-20190604053449-0f29369cfe45
+	golang.org/x/sys v0.0.0-20190507160741-ecd444e8653b
 	google.golang.org/api v0.6.0
 )
