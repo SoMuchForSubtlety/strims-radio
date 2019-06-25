@@ -40,6 +40,7 @@ type bot struct {
 	songStarted      time.Time
 	skipUsers        userList
 	updateUsers      userList
+	likedUsers       userList
 	haste            *haste.Haste
 	playlistURL      string
 	playlistURLDirty bool
@@ -107,7 +108,7 @@ func main() {
 
 	file, err := ioutil.ReadFile("queue.json")
 	if err != nil {
-		fmt.Printf("no previous playlist found: %v", err)
+		log.Printf("[INFO] no previous playlist found: %v", err)
 	} else {
 		err = json.Unmarshal([]byte(file), &bot.waitingQueue)
 		if err != nil {
@@ -258,7 +259,7 @@ func (b *bot) answer(contents *contents, private bool) {
 	if contents.Data == "-playing" {
 		elapsed := time.Since(b.songStarted)
 
-		response := fmt.Sprintf("`%v` `%v/%v` curretly playing: 🎶 %q 🎶 requested by %s", durationBar(15, elapsed, b.currentEntry.Video.Duration), fmtDuration(elapsed), fmtDuration(b.currentEntry.Video.Duration), b.currentEntry.Video.Title, b.currentEntry.User)
+		response := fmt.Sprintf("`%v` `%v/%v` currently playing: 🎶 %q 🎶 requested by %s %v ", durationBar(15, elapsed, b.currentEntry.Video.Duration), fmtDuration(elapsed), fmtDuration(b.currentEntry.Video.Duration), b.currentEntry.Video.Title, b.currentEntry.User, youtubeURLStart+b.currentEntry.Video.ID)
 
 		b.sendMsg(response, contents.Nick)
 		return
@@ -302,7 +303,7 @@ func (b *bot) answer(contents *contents, private bool) {
 		if b.playlistURLDirty {
 			hasteResp, err := b.haste.UploadString(b.formatPlaylist())
 			if err != nil {
-				fmt.Printf("encountered error trying to upload to hastebin: %v", err)
+				log.Printf("[ERROR] failed to upload to hastebin: %v", err)
 				b.sendMsg("there was an error", contents.Nick)
 				return
 			}
@@ -320,6 +321,10 @@ func (b *bot) answer(contents *contents, private bool) {
 			b.updateUsers.remove(contents.Nick)
 			b.sendMsg("You will no longer get notifications.", contents.Nick)
 		}
+		return
+	} else if contents.Data == "-like" {
+		b.likedUsers.add(contents.Nick)
+		b.sendMsg(fmt.Sprintf("I will tell %v you like their song PeepoHappy ", b.currentEntry.User), contents.Nick)
 		return
 	} else if urlType1.Match([]byte(contents.Data)) {
 		videoID = regexp.MustCompile(`v=[a-zA-Z0-9_-]+`).FindString(contents.Data)[2:]
@@ -353,7 +358,7 @@ func (b *bot) answer(contents *contents, private bool) {
 func (b *bot) push(newEntry queueEntry) {
 	defer b.savePlaylist()
 	b.playlistURLDirty = true
-	log.Printf("[INFO] adding '%s' for {%v}", newEntry.Video.Title, newEntry.User)
+	log.Printf("[INFO] ➕ adding '%s' for {%v}", newEntry.Video.Title, newEntry.User)
 	b.waitingQueue.Lock()
 	if len(b.waitingQueue.Items) > 5 {
 		for i, entry := range b.waitingQueue.Items {
@@ -406,7 +411,11 @@ func parseMessage(msg []byte) (*message, error) {
 
 func parseContents(received string, length int) *contents {
 	contents := contents{}
-	json.Unmarshal([]byte(received[length:]), &contents)
+	err := json.Unmarshal([]byte(received[length:]), &contents)
+	if err != nil {
+		contents.Nick = "strims"
+		contents.Data = received
+	}
 	return &contents
 }
 
@@ -439,7 +448,7 @@ func (b *bot) play() {
 		urlProper := strings.TrimSpace(string(url))
 		b.songStarted = time.Now()
 		command = exec.Command("ffmpeg", "-reconnect", "1", "-reconnect_at_eof", "1", "-reconnect_delay_max", "3", "-re", "-i", urlProper, "-codec:a", "aac", "-f", "flv", b.con.Ingest+b.con.Key)
-		log.Printf("[INFO] Now Playing {%s}'s request: %s", b.currentEntry.User, b.currentEntry.Video.Title)
+		log.Printf("[INFO] ▶ Now Playing {%s}'s request: %s", b.currentEntry.User, b.currentEntry.Video.Title)
 		b.runningCommand = command
 		err = command.Start()
 		if err != nil {
@@ -449,6 +458,14 @@ func (b *bot) play() {
 		if err != nil {
 			log.Printf("[ERROR] ffmpeg aborted or errored: %v", err)
 		}
+		if len(b.likedUsers.Users) > 0 {
+			ppl := "people"
+			if len(b.likedUsers.Users) == 1 {
+				ppl = "person"
+			}
+			b.sendMsg(fmt.Sprintf("%v %v really liked your song PeepoHappy", len(b.likedUsers.Users), ppl), b.currentEntry.User)
+		}
+		b.likedUsers.clear()
 		b.savePlaylist()
 		b.runningCommand = nil
 	}
@@ -469,7 +486,7 @@ func (b *bot) messageSender() {
 			b.errorChan <- err
 			return
 		}
-		time.Sleep(time.Millisecond * 350)
+		time.Sleep(time.Millisecond * 400)
 	}
 }
 
