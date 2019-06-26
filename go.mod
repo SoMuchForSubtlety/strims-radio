@@ -4,7 +4,7 @@ go 1.12
 
 require (
 	github.com/Ronmi/pastebin v0.0.0-20180209215645-c677cc16dbd7
-	github.com/SoMuchForSubtlety/fileupload v0.0.0-20190501234410-5cee83efce0d // indirect
+	github.com/SoMuchForSubtlety/fileupload v0.0.0-20190501234410-5cee83efce0d
 	github.com/Syfaro/haste-client v0.0.0-20150731062254-09b1fbfa3977
 	github.com/gorilla/websocket v1.4.0
 	github.com/syfaro/haste-client v0.0.0-20150731062254-09b1fbfa3977 // indirect

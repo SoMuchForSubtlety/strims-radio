@@ -12,11 +12,13 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
+	"github.com/SoMuchForSubtlety/fileupload"
 	"github.com/Syfaro/haste-client"
 	"github.com/gorilla/websocket"
 	"golang.org/x/sys/windows"
@@ -58,11 +60,12 @@ type contents struct {
 }
 
 type config struct {
-	AuthToken string `json:"auth_token"`
-	Address   string `json:"address"`
-	Ingest    string `json:"ingest"`
-	Key       string `json:"key"`
-	APIKey    string `json:"api_key"`
+	AuthToken  string   `json:"auth_token"`
+	Address    string   `json:"address"`
+	Ingest     string   `json:"ingest"`
+	Key        string   `json:"key"`
+	APIKey     string   `json:"api_key"`
+	Moderators []string `json:"moderators"`
 }
 
 type video struct {
@@ -72,8 +75,9 @@ type video struct {
 }
 
 type queueEntry struct {
-	Video video
-	User  string
+	Video      video
+	User       string
+	Dedication string
 }
 
 type queue struct {
@@ -112,7 +116,7 @@ func main() {
 	} else {
 		err = json.Unmarshal([]byte(file), &bot.waitingQueue)
 		if err != nil {
-			fmt.Printf("[ERROR] failed to unmarshal queue: %v", err)
+			log.Printf("[ERROR] failed to unmarshal queue: %v", err)
 		} else {
 			log.Printf("[INFO] loaded playlist with %v songs", len(bot.waitingQueue.Items))
 		}
@@ -258,8 +262,11 @@ func (b *bot) answer(contents *contents, private bool) {
 
 	if contents.Data == "-playing" {
 		elapsed := time.Since(b.songStarted)
-
-		response := fmt.Sprintf("`%v` `%v/%v` currently playing: 🎶 %q 🎶 requested by %s %v ", durationBar(15, elapsed, b.currentEntry.Video.Duration), fmtDuration(elapsed), fmtDuration(b.currentEntry.Video.Duration), b.currentEntry.Video.Title, b.currentEntry.User, youtubeURLStart+b.currentEntry.Video.ID)
+		bonus := ""
+		if b.currentEntry.Dedication != "" {
+			bonus = fmt.Sprintf("- dedicated to %s -", b.currentEntry.Dedication)
+		}
+		response := fmt.Sprintf("`%v` `%v/%v` currently playing: 🎶 %q 🎶 requested by %s %s %v ", durationBar(15, elapsed, b.currentEntry.Video.Duration), fmtDuration(elapsed), fmtDuration(b.currentEntry.Video.Duration), b.currentEntry.Video.Title, b.currentEntry.User, bonus, youtubeURLStart+b.currentEntry.Video.ID)
 
 		b.sendMsg(response, contents.Nick)
 		return
@@ -269,7 +276,11 @@ func (b *bot) answer(contents *contents, private bool) {
 			b.sendMsg("No song queued", contents.Nick)
 			return
 		}
-		b.sendMsg(fmt.Sprintf("up next: %q requested by %s", next.Video.Title, next.User), contents.Nick)
+		bonus := ""
+		if b.currentEntry.Dedication != "" {
+			bonus = fmt.Sprintf(" and dedicated to %s", b.currentEntry.Dedication)
+		}
+		b.sendMsg(fmt.Sprintf("up next: '%v' requested by %s%s", next.Video.Title, next.User, bonus), contents.Nick)
 		return
 	} else if contents.Data == "-skip" && false {
 		index := b.skipUsers.search(contents.Nick)
@@ -301,14 +312,44 @@ func (b *bot) answer(contents *contents, private bool) {
 		return
 	} else if contents.Data == "-playlist" {
 		if b.playlistURLDirty {
-			hasteResp, err := b.haste.UploadString(b.formatPlaylist())
+			var url string
+			var err error
+			var file *os.File
+			playlist := b.formatPlaylist()
+			type resp struct {
+				response *haste.Response
+				er       error
+			}
+			c1 := make(chan resp)
+			go func() {
+				hasteResp, err := b.haste.UploadString(playlist)
+				time.Sleep(2 * time.Second)
+				c1 <- resp{response: hasteResp, er: err}
+			}()
+
+			select {
+			case res := <-c1:
+				err = res.er
+				url = "https://hastebin.com/raw/" + res.response.Key
+			case <-time.After(1 * time.Second):
+				err = ioutil.WriteFile("playlist.txt", []byte(playlist), 0644)
+				if err != nil {
+					break
+				}
+				file, err = os.Open("playlist.txt")
+				if err != nil {
+					break
+				}
+				url, err = fileupload.UploadToHost("https://uguu.se/api.php?d=upload-tool", file)
+			}
 			if err != nil {
-				log.Printf("[ERROR] failed to upload to hastebin: %v", err)
+				log.Printf("[ERROR] failed to upload playlist: %v", err)
 				b.sendMsg("there was an error", contents.Nick)
 				return
 			}
+			log.Println("[INFO] 📝 Generated playlist")
 			b.playlistURLDirty = false
-			b.playlistURL = "https://hastebin.com/raw/" + hasteResp.Key
+			b.playlistURL = url
 		}
 		b.sendMsg(fmt.Sprintf("you can find the current playlist here: %v", b.playlistURL), contents.Nick)
 		return
@@ -325,7 +366,40 @@ func (b *bot) answer(contents *contents, private bool) {
 	} else if contents.Data == "-like" {
 		b.likedUsers.add(contents.Nick)
 		b.sendMsg(fmt.Sprintf("I will tell %v you like their song PeepoHappy ", b.currentEntry.User), contents.Nick)
+		log.Printf("[INFO] 💖 %v liked %v's song", contents.Nick, b.currentEntry.User)
 		return
+	} else if strings.Contains(contents.Data, "-dedicate") {
+		dedication := strings.TrimSpace(strings.Replace(contents.Data, "-dedicate", "", -1))
+		err := b.addDedication(contents.Nick, dedication)
+		if err != nil {
+			b.sendMsg("You don't have a song in the queue.", contents.Nick)
+			return
+		} else if dedication == "" {
+			b.sendMsg("dedicate deez nuts", contents.Nick)
+			return
+		}
+
+		b.sendMsg(fmt.Sprintf("Dedicated your song to %s", dedication), contents.Nick)
+		return
+	} else if strings.Contains(contents.Data, "-remove") {
+		if !b.checkMod(contents.Nick) {
+			b.sendMsg("You're not mod", contents.Nick)
+			return
+		}
+		intString := strings.TrimSpace(strings.Replace(contents.Data, "-remove", "", -1))
+		index, err := strconv.Atoi(intString)
+		if err != nil {
+			b.sendMsg("please enter a valid integer", contents.Nick)
+			return
+		}
+		err = b.removeIndex(index - 1)
+		if err != nil {
+			b.sendMsg("index out of range", contents.Nick)
+			return
+		}
+		b.sendMsg("Successfully removed", contents.Nick)
+		return
+
 	} else if urlType1.Match([]byte(contents.Data)) {
 		videoID = regexp.MustCompile(`v=[a-zA-Z0-9_-]+`).FindString(contents.Data)[2:]
 	} else if urlType2.Match([]byte(contents.Data)) {
@@ -358,18 +432,20 @@ func (b *bot) answer(contents *contents, private bool) {
 func (b *bot) push(newEntry queueEntry) {
 	defer b.savePlaylist()
 	b.playlistURLDirty = true
-	log.Printf("[INFO] ➕ adding '%s' for {%v}", newEntry.Video.Title, newEntry.User)
 	b.waitingQueue.Lock()
 	if len(b.waitingQueue.Items) > 5 {
 		for i, entry := range b.waitingQueue.Items {
 			if entry.User == newEntry.User {
+				newEntry.Dedication = b.waitingQueue.Items[i].Dedication
 				b.waitingQueue.Items[i] = newEntry
 				b.waitingQueue.Unlock()
+				log.Printf("[INFO] ♻️ changing %s's song to '%s'", newEntry.User, newEntry.Video.Title)
 				b.sendMsg(fmt.Sprintf("Replaced your previous selection. %v", b.queuePositionMessage(newEntry.User)), newEntry.User)
 				return
 			}
 		}
 	}
+	log.Printf("[INFO] ➕ adding '%s' for %s", newEntry.Video.Title, newEntry.User)
 	b.waitingQueue.Items = append(b.waitingQueue.Items, newEntry)
 	b.waitingQueue.Unlock()
 	b.sendMsg(fmt.Sprintf("Added your request to the queue. %v", b.queuePositionMessage(newEntry.User)), newEntry.User)
@@ -395,6 +471,17 @@ func (b *bot) peek() (queueEntry, error) {
 	}
 	entry := b.waitingQueue.Items[0]
 	return entry, nil
+}
+
+func (b *bot) removeIndex(index int) error {
+	b.playlistURLDirty = true
+	b.waitingQueue.Lock()
+	if index >= len(b.waitingQueue.Items) || index < 0 {
+		return errors.New("index out of range")
+	}
+	b.waitingQueue.Items = append(b.waitingQueue.Items[:index], b.waitingQueue.Items[index+1:]...)
+	b.waitingQueue.Unlock()
+	return nil
 }
 
 func parseMessage(msg []byte) (*message, error) {
@@ -433,9 +520,19 @@ func (b *bot) play() {
 			continue
 		}
 		b.currentEntry = entry
+
 		b.sendMsg("Playing your song now", b.currentEntry.User)
+
 		for _, user := range b.updateUsers.Users {
-			b.sendMsg(fmt.Sprintf("Now Playing %s's request: %s", b.currentEntry.User, b.currentEntry.Video.Title), user)
+			bonus := ""
+			if b.currentEntry.Dedication != "" {
+				bonus = fmt.Sprintf("- dedicated to %s", b.currentEntry.Dedication)
+			}
+			b.sendMsg(fmt.Sprintf("Now Playing %s's request: %s %s", b.currentEntry.User, b.currentEntry.Video.Title, bonus), user)
+		}
+
+		if b.currentEntry.Dedication != "" {
+			b.sendMsg(fmt.Sprintf("%s dedicated this song to you 💖", b.currentEntry.User), b.currentEntry.Dedication)
 		}
 
 		command := exec.Command("youtube-dl", "-f", "bestaudio", "-g", youtubeURLStart+b.currentEntry.Video.ID)
@@ -448,7 +545,7 @@ func (b *bot) play() {
 		urlProper := strings.TrimSpace(string(url))
 		b.songStarted = time.Now()
 		command = exec.Command("ffmpeg", "-reconnect", "1", "-reconnect_at_eof", "1", "-reconnect_delay_max", "3", "-re", "-i", urlProper, "-codec:a", "aac", "-f", "flv", b.con.Ingest+b.con.Key)
-		log.Printf("[INFO] ▶ Now Playing {%s}'s request: %s", b.currentEntry.User, b.currentEntry.Video.Title)
+		log.Printf("[INFO] ▶ Now Playing %s's request: %s", b.currentEntry.User, b.currentEntry.Video.Title)
 		b.runningCommand = command
 		err = command.Start()
 		if err != nil {
@@ -458,6 +555,7 @@ func (b *bot) play() {
 		if err != nil {
 			log.Printf("[ERROR] ffmpeg aborted or errored: %v", err)
 		}
+		log.Println("[INFO] 🛑 Done Playing")
 		if len(b.likedUsers.Users) > 0 {
 			ppl := "people"
 			if len(b.likedUsers.Users) == 1 {
@@ -479,8 +577,7 @@ func (b *bot) messageSender() {
 	for {
 		cont := <-b.msgSenderChan
 		messageS, _ := json.Marshal(cont)
-		log.Printf("[INFO] sending response to {%v}: '%s'", cont.Nick, cont.Data)
-		// TODO: properly marshal message as json
+		log.Printf("[MSG] sending message to %v: '%s'", cont.Nick, cont.Data)
 		err := b.conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`PRIVMSG %s`, messageS)))
 		if err != nil {
 			b.errorChan <- err
@@ -575,6 +672,17 @@ func (b *bot) queuePositionMessage(nick string) string {
 	return s1
 }
 
+func (b *bot) addDedication(owner string, target string) error {
+	b.waitingQueue.Lock()
+	defer b.waitingQueue.Unlock()
+	position := b.getUserPosition(owner)
+	if position < 0 {
+		return errors.New("user not in queue")
+	}
+	b.waitingQueue.Items[position].Dedication = target
+	return nil
+}
+
 func (b *bot) formatPlaylist() string {
 	lines := fmt.Sprintf(" curretly playing: 🎶 %q 🎶 requested by %s\n\n", b.currentEntry.Video.Title, b.currentEntry.User)
 	var maxname int
@@ -587,4 +695,13 @@ func (b *bot) formatPlaylist() string {
 		lines += fmt.Sprintf(" %2v | %-*v | %v | %v\n", i+1, maxname, vid.User, fmtDuration(vid.Video.Duration), vid.Video.Title)
 	}
 	return lines
+}
+
+func (b *bot) checkMod(nick string) bool {
+	for _, mod := range b.con.Moderators {
+		if nick == mod {
+			return true
+		}
+	}
+	return false
 }
