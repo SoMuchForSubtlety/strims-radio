@@ -108,7 +108,6 @@ func main() {
 	if err = bot.setAddress(config.Address); err != nil {
 		log.Fatal(err)
 	}
-	bot.msgSenderChan = make(chan contents, 100)
 
 	file, err := ioutil.ReadFile("queue.json")
 	if err != nil {
@@ -122,17 +121,10 @@ func main() {
 		}
 	}
 
-	bot.client = &http.Client{Transport: &transport.APIKey{Key: config.APIKey}}
-	ytServ, err := youtube.New(bot.client)
-	if err != nil {
-		log.Fatalf("error creating client: %v", err)
-	}
-	bot.ytServ = ytServ
-
 	go bot.play()
 
 	for {
-		log.Println("[INFO] trying to establish connection")
+		log.Println("[INFO] 🌐 trying to establish connection")
 		err = bot.connect()
 		if err != nil {
 			log.Printf("[ERROR] bot error: %v", err)
@@ -170,7 +162,16 @@ func readConfig() (*config, error) {
 
 func newBot(config config) *bot {
 	h := haste.NewHaste("https://hastebin.com")
-	return &bot{authToken: ";jwt=" + config.AuthToken, con: config, haste: h}
+	bot := bot{authToken: ";jwt=" + config.AuthToken, con: config, haste: h}
+	bot.errorChan = make(chan error)
+	bot.msgSenderChan = make(chan contents, 100)
+	bot.client = &http.Client{Transport: &transport.APIKey{Key: config.APIKey}}
+	ytServ, err := youtube.New(bot.client)
+	if err != nil {
+		log.Fatalf("[ERROR] could not connect to youtube API: %v", err)
+	}
+	bot.ytServ = ytServ
+	return &bot
 }
 
 func (b *bot) setAddress(url string) error {
@@ -196,7 +197,7 @@ func (b *bot) connect() error {
 	if err != nil {
 		return fmt.Errorf("handshake failed with status: %v", resp)
 	}
-	log.Println("[INFO] Connection established.")
+	log.Println("[INFO] ✔️ Connection established.")
 	b.conn = conn
 
 	go b.messageSender()
@@ -232,8 +233,7 @@ func (b *bot) listen() error {
 			}
 		}
 	}()
-	err := <-b.errorChan
-	return err
+	return <-b.errorChan
 }
 
 func (b *bot) close() error {
@@ -479,8 +479,10 @@ func (b *bot) removeIndex(index int) error {
 	if index >= len(b.waitingQueue.Items) || index < 0 {
 		return errors.New("index out of range")
 	}
+	song := b.waitingQueue.Items[index]
 	b.waitingQueue.Items = append(b.waitingQueue.Items[:index], b.waitingQueue.Items[index+1:]...)
 	b.waitingQueue.Unlock()
+	log.Printf("[INFO] 🗑️ removed %v's song '%v' at index %v", song.User, song.Video.Title, index)
 	return nil
 }
 
