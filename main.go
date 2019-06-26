@@ -109,18 +109,6 @@ func main() {
 		log.Fatal(err)
 	}
 
-	file, err := ioutil.ReadFile("queue.json")
-	if err != nil {
-		log.Printf("[INFO] no previous playlist found: %v", err)
-	} else {
-		err = json.Unmarshal([]byte(file), &bot.waitingQueue)
-		if err != nil {
-			log.Printf("[ERROR] failed to unmarshal queue: %v", err)
-		} else {
-			log.Printf("[INFO] loaded playlist with %v songs", len(bot.waitingQueue.Items))
-		}
-	}
-
 	go bot.play()
 
 	for {
@@ -171,6 +159,31 @@ func newBot(config config) *bot {
 		log.Fatalf("[ERROR] could not connect to youtube API: %v", err)
 	}
 	bot.ytServ = ytServ
+
+	file, err := ioutil.ReadFile("queue.json")
+	if err != nil {
+		log.Printf("[INFO] no previous playlist found: %v", err)
+	} else {
+		err = json.Unmarshal([]byte(file), &bot.waitingQueue)
+		if err != nil {
+			log.Printf("[ERROR] failed to unmarshal queue: %v", err)
+		} else {
+			log.Printf("[INFO] loaded playlist with %v songs", len(bot.waitingQueue.Items))
+		}
+	}
+
+	file, err = ioutil.ReadFile("updateUsers.json")
+	if err != nil {
+		log.Printf("[INFO] no user list found: %v", err)
+	} else {
+		err = json.Unmarshal([]byte(file), &bot.updateUsers)
+		if err != nil {
+			log.Printf("[ERROR] failed to unmarshal user list: %v", err)
+		} else {
+			log.Printf("[INFO] loaded user list with %v entries", len(bot.waitingQueue.Items))
+		}
+	}
+
 	return &bot
 }
 
@@ -323,7 +336,6 @@ func (b *bot) answer(contents *contents, private bool) {
 			c1 := make(chan resp)
 			go func() {
 				hasteResp, err := b.haste.UploadString(playlist)
-				time.Sleep(2 * time.Second)
 				c1 <- resp{response: hasteResp, er: err}
 			}()
 
@@ -361,6 +373,10 @@ func (b *bot) answer(contents *contents, private bool) {
 		} else {
 			b.updateUsers.remove(contents.Nick)
 			b.sendMsg("You will no longer get notifications.", contents.Nick)
+		}
+		err := saveStruct(b.updateUsers, "updateUsers.json")
+		if err != nil {
+			log.Printf("[ERROR] failed to save struct: %v", err)
 		}
 		return
 	} else if contents.Data == "-like" {
@@ -430,7 +446,6 @@ func (b *bot) answer(contents *contents, private bool) {
 }
 
 func (b *bot) push(newEntry queueEntry) {
-	defer b.savePlaylist()
 	b.playlistURLDirty = true
 	b.waitingQueue.Lock()
 	if len(b.waitingQueue.Items) > 5 {
@@ -448,6 +463,10 @@ func (b *bot) push(newEntry queueEntry) {
 	log.Printf("[INFO] ➕ adding '%s' for %s", newEntry.Video.Title, newEntry.User)
 	b.waitingQueue.Items = append(b.waitingQueue.Items, newEntry)
 	b.waitingQueue.Unlock()
+	err := saveStruct(b.waitingQueue, "queue.json")
+	if err != nil {
+		log.Printf("[ERROR] failed to save struct: %v", err)
+	}
 	b.sendMsg(fmt.Sprintf("Added your request to the queue. %v", b.queuePositionMessage(newEntry.User)), newEntry.User)
 }
 
@@ -566,7 +585,10 @@ func (b *bot) play() {
 			b.sendMsg(fmt.Sprintf("%v %v really liked your song PeepoHappy", len(b.likedUsers.Users), ppl), b.currentEntry.User)
 		}
 		b.likedUsers.clear()
-		b.savePlaylist()
+		err = saveStruct(b.waitingQueue, "queue.json")
+		if err != nil {
+			log.Printf("[ERROR] failed to save struct: %v", err)
+		}
 		b.runningCommand = nil
 	}
 }
@@ -649,12 +671,12 @@ func durationBar(width int, fraction time.Duration, total time.Duration) string 
 	return replaceAtIndex(base, '⚫', newpos)
 }
 
-func (b *bot) savePlaylist() error {
-	file, err := json.MarshalIndent(&b.waitingQueue, "", "	")
+func saveStruct(v interface{}, title string) error {
+	file, err := json.MarshalIndent(&v, "", "	")
 	if err != nil {
 		return err
 	}
-	err = ioutil.WriteFile("queue.json", file, 0644)
+	err = ioutil.WriteFile(title, file, 0644)
 	if err != nil {
 		return err
 	}
