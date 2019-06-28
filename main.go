@@ -39,7 +39,7 @@ type controller struct {
 	cfg       config
 	sgg       *dggchat.Session
 	msgBuffer chan outgoingMessage
-	dj        opendj.Dj
+	dj        *opendj.Dj
 
 	haste *haste.Haste
 
@@ -57,18 +57,46 @@ type outgoingMessage struct {
 
 func main() {
 	var err error
+
+	cont, err := initController()
+	if err != nil {
+		log.Fatalf("[ERROR] could not initialize controller: %v", err)
+	}
+
+	// Open a connection
+	err = cont.sgg.Open()
+	if err != nil {
+		log.Fatalln(err)
+	}
+	// Cleanly close the connection
+	defer cont.sgg.Close()
+
+	cont.dj.Play(cont.cfg.Rtmp)
+
+	// Wait for ctr-C to shut down
+	sc := make(chan os.Signal, 1)
+	signal.Notify(sc, syscall.SIGINT)
+	<-sc
+}
+
+func initController() (c *controller, err error) {
 	var cont controller
+
 	cont.cfg, err = readConfig("config.json")
 	if err != nil {
-		log.Fatalf("[ERROR] could not load config: %v", err)
+		return nil, err
 	}
+
+	cont.msgBuffer = make(chan outgoingMessage, 100)
+	cont.haste = haste.NewHaste("https://hastebin.com")
 
 	client := &http.Client{Transport: &transport.APIKey{Key: cont.cfg.APIKey}}
 	cont.ytServ, err = youtube.New(client)
 	if err != nil {
-		log.Fatalf("[ERROR] could not connect to youtube API: %v", err)
+		return nil, err
 	}
 
+	// load the saved playlist if there is one
 	var queue localQueue
 
 	file, err := ioutil.ReadFile("queue.json")
@@ -83,36 +111,39 @@ func main() {
 		}
 	}
 
-	dj, err := opendj.NewDj(queue.q)
+	// load update subscribers
+	file, err = ioutil.ReadFile("updateUsers.json")
 	if err != nil {
-		log.Fatalf("Failed to initialize dj: %v", err)
+		log.Printf("[INFO] no user list found: %v", err)
+	} else {
+		err = json.Unmarshal([]byte(file), &cont.updateSubscribers)
+		if err != nil {
+			log.Printf("[ERROR] failed to unmarshal user list: %v", err)
+		} else {
+			log.Printf("[INFO] loaded user list with %v entries", len(cont.updateSubscribers.Users))
+		}
 	}
-	dj.AddNewSongHandler(cont.newSong)
-	dj.Play(cont.cfg.Rtmp)
 
-	// Create a new client
+	// create dj
+	cont.dj, err = opendj.NewDj(queue.q)
+	if err != nil {
+		return nil, err
+	}
+
+	cont.dj.AddNewSongHandler(cont.newSong)
+	cont.dj.AddEndOfSongHandler(c.songOver)
+	cont.dj.AddPlaybackErrorHandler(c.songError)
+
+	// Create a new sgg client
 	cont.sgg, err = dggchat.New(cont.cfg.AuthToken)
 	if err != nil {
-		log.Fatalln(err)
+		return nil, err
 	}
-
-	// Open a connection
-	err = cont.sgg.Open()
-	if err != nil {
-		log.Fatalln(err)
-	}
-
-	// Cleanly close the connection
-	defer cont.sgg.Close()
 
 	cont.sgg.AddPMHandler(cont.onPrivMessage)
 	cont.sgg.AddErrorHandler(onError)
 
-	// Wait for ctr-C to shut down
-	sc := make(chan os.Signal, 1)
-	signal.Notify(sc, syscall.SIGINT)
-	<-sc
-
+	return &cont, nil
 }
 
 func readConfig(title string) (cfg config, err error) {
@@ -154,6 +185,9 @@ func (c *controller) onPrivMessage(m dggchat.PrivateMessage, s *dggchat.Session)
 	case "-playlist":
 		c.sendPlaylist(m.User.Nick)
 		return
+	case "-updateme":
+		c.addUserToUpdates(m.User.Nick)
+		return
 	default:
 	}
 
@@ -162,6 +196,8 @@ func (c *controller) onPrivMessage(m dggchat.PrivateMessage, s *dggchat.Session)
 		return
 	} else if strings.Contains(trimmedMsg, "-dedicate") {
 		c.addDedication(m.Message, m.User.Nick)
+	} else if strings.Contains(trimmedMsg, "-like") {
+
 	}
 
 }
@@ -261,6 +297,33 @@ func (c *controller) sendPlaylist(nick string) {
 	}
 
 	c.sendMsg(fmt.Sprintf("you can find the current playlist here: %v", c.playlistLink), nick)
+}
+
+func (c *controller) likeSong(nick string) {
+	playing, _, err := c.dj.CurrentlyPlaying()
+	if err != nil {
+		c.sendMsg("There is nothing currently playing.", nick)
+		return
+	}
+	result := c.likes.search(nick)
+	if result > 0 {
+		c.sendMsg("You already liked this song.", nick)
+		return
+	}
+	c.likes.add(nick)
+	c.sendMsg(fmt.Sprintf("I will tell %v you liked \"%v\"", playing.Owner, playing.Media.Title), nick)
+}
+
+func (c *controller) addUserToUpdates(nick string) {
+	index := c.updateSubscribers.search(nick)
+	if index < 0 {
+		c.sendMsg("You will now get a message every time a new song plays. send `-updateme` again to turn it off.", nick)
+		c.updateSubscribers.add(nick)
+	} else {
+		c.sendMsg("You will no longer get notifications.", nick)
+		c.updateSubscribers.remove(nick)
+	}
+	saveStruct(&c.updateSubscribers, "updateUsers.json")
 }
 
 func (c *controller) removeItem(message string, nick string) {
@@ -374,6 +437,7 @@ func (c *controller) messageSender() {
 }
 
 func (c *controller) newSong(entry opendj.QueueEntry) {
+
 	msg := fmt.Sprintf("Now Playing %s's request: %s", entry.Owner, entry.Media.Title)
 	log.Println("[INFO] ▶ " + msg)
 
@@ -388,4 +452,36 @@ func (c *controller) newSong(entry opendj.QueueEntry) {
 	}
 
 	c.sendMsg("Playing your song now", entry.Owner)
+}
+
+func (c *controller) songOver(entry opendj.QueueEntry, err error) {
+	log.Println("[INFO] 🛑 Done Playing")
+	queue := localQueue{q: c.dj.Queue()}
+	saveStruct(queue, "queue.json")
+
+	likes := len(c.likes.Users)
+	if likes > 0 {
+		ppl := "people"
+		if likes == 1 {
+			ppl = "person"
+		}
+		c.sendMsg(fmt.Sprintf("%v %v really liked your song PeepoHappy", likes, ppl), entry.Owner)
+	}
+	c.likes.clear()
+}
+
+func (c *controller) songError(err error) {
+	log.Printf("[ERROR] there was an error during song playback: %v", err)
+}
+
+func saveStruct(v interface{}, title string) error {
+	file, err := json.MarshalIndent(&v, "", "	")
+	if err != nil {
+		return err
+	}
+	err = ioutil.WriteFile(title, file, 0644)
+	if err != nil {
+		return err
+	}
+	return nil
 }
