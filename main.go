@@ -56,8 +56,6 @@ type outgoingMessage struct {
 }
 
 func main() {
-	var err error
-
 	cont, err := initController()
 	if err != nil {
 		log.Fatalf("[ERROR] could not initialize controller: %v", err)
@@ -71,7 +69,9 @@ func main() {
 	// Cleanly close the connection
 	defer cont.sgg.Close()
 
-	cont.dj.Play(cont.cfg.Rtmp)
+	go cont.dj.Play(cont.cfg.Rtmp)
+
+	cont.sgg.SendMessage("I am online")
 
 	// Wait for ctr-C to shut down
 	sc := make(chan os.Signal, 1)
@@ -82,7 +82,7 @@ func main() {
 func initController() (c *controller, err error) {
 	var cont controller
 
-	cont.cfg, err = readConfig("config.json")
+	cont.cfg, err = readConfig("newConfig.json")
 	if err != nil {
 		return nil, err
 	}
@@ -136,6 +136,7 @@ func initController() (c *controller, err error) {
 
 	// Create a new sgg client
 	cont.sgg, err = dggchat.New(cont.cfg.AuthToken)
+
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +200,6 @@ func (c *controller) onPrivMessage(m dggchat.PrivateMessage, s *dggchat.Session)
 	} else if strings.Contains(trimmedMsg, "-like") {
 
 	}
-
 }
 
 func onError(e string, s *dggchat.Session) {
@@ -207,6 +207,24 @@ func onError(e string, s *dggchat.Session) {
 }
 
 func (c *controller) addYTlink(m dggchat.PrivateMessage) {
+	queue := c.dj.Queue()
+	var duration time.Duration
+	var maxduration float64
+
+	for _, item := range queue {
+		duration += item.Media.Duration
+	}
+
+	if duration.Minutes() <= 1 {
+		maxduration = 60
+	} else if duration.Minutes() <= 20 {
+		maxduration = 20
+	} else if duration.Minutes() <= 60 {
+		maxduration = 10
+	} else {
+		maxduration = 5
+	}
+
 	ytURLStart := "https://www.youtube.com/watch?v="
 
 	id := regexp.MustCompile(`(\?v=|be\/)[a-zA-Z0-9-_]+`).FindString(m.Message)[3:]
@@ -216,7 +234,6 @@ func (c *controller) addYTlink(m dggchat.PrivateMessage) {
 	}
 
 	res, err := c.ytServ.Videos.List("id,snippet,contentDetails").Id(id).Do()
-	var duration time.Duration
 	if err != nil {
 		log.Printf("[ERROR] youtube API query failed: %v", err)
 		c.sendMsg("there was an error", m.User.Nick)
@@ -224,8 +241,8 @@ func (c *controller) addYTlink(m dggchat.PrivateMessage) {
 	} else if len(res.Items) < 1 {
 		c.sendMsg("invalid link", m.User.Nick)
 		return
-	} else if duration, _ = time.ParseDuration(strings.ToLower(res.Items[0].ContentDetails.Duration[2:])); duration.Minutes() >= 10 {
-		c.sendMsg("This song is too long, please keep it under 10 minutes", m.User.Nick)
+	} else if duration, _ = time.ParseDuration(strings.ToLower(res.Items[0].ContentDetails.Duration[2:])); duration.Minutes() >= maxduration {
+		c.sendMsg(fmt.Sprintf("This song is too long, please keep it under %v minutes", maxduration), m.User.Nick)
 		return
 	}
 
