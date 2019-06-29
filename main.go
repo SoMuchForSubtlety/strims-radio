@@ -139,7 +139,7 @@ func initController() (c *controller, err error) {
 	}
 
 	// create dj
-	c.dj, err = opendj.NewDj(queue.Q)
+	c.dj = opendj.NewDj(queue.Q)
 	if err != nil {
 		return nil, err
 	}

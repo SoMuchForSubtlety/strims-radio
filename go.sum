@@ -7,8 +7,8 @@ github.com/MemeLabs/dggchat v0.0.0-20171209033102-97642b4d160e h1:vKqIgeWB8ZGI+5
 github.com/MemeLabs/dggchat v0.0.0-20171209033102-97642b4d160e/go.mod h1:79uX6bMosuro/odeRKlQhvgMDeLAU10UfaIyTjxaXKY=
 github.com/SoMuchForSubtlety/fileupload v0.0.0-20190501234410-5cee83efce0d h1:w/YIAuoJkAGoyh4ObM82R3ijgpZ9yN0J9V/bblJpugM=
 github.com/SoMuchForSubtlety/fileupload v0.0.0-20190501234410-5cee83efce0d/go.mod h1:V9UyAKunuViDBcrQDqXsrJ9V1/ZuGMyxSLqiNI/iU34=
-github.com/SoMuchForSubtlety/opendj v0.0.0-20190628005548-b52269cb6864 h1:NQn93/SKI/YgbhFF5Bip3XteBiH/Ph/K6wDoyOCHeOs=
-github.com/SoMuchForSubtlety/opendj v0.0.0-20190628005548-b52269cb6864/go.mod h1:fMvmu0wW9UbVnw2gRIBF1OQ6o4wRJDOHzyal5Ixqd+A=
+github.com/SoMuchForSubtlety/opendj v0.0.0-20190629180339-269d47a5f9fb h1:uEWaYDnjAVKtebK24F7eIR7zh+WXHZCOqD+u3wqkLao=
+github.com/SoMuchForSubtlety/opendj v0.0.0-20190629180339-269d47a5f9fb/go.mod h1:fMvmu0wW9UbVnw2gRIBF1OQ6o4wRJDOHzyal5Ixqd+A=
 github.com/Syfaro/haste-client v0.0.0-20150731062254-09b1fbfa3977 h1:TNSlqenJvcSPpBafY50g0RD/eVrIUj2i6BTIiRqM9y0=
 github.com/Syfaro/haste-client v0.0.0-20150731062254-09b1fbfa3977/go.mod h1:+XuCpHuIAbb/5Z9KW7rOZ5N85++Yck9u+VkrzE4GA6w=
 github.com/client9/misspell v0.3.4/go.mod h1:qj6jICC3Q7zFZvVWo7KLAzC3yx5G7kyvSDkc90ppPyw=
