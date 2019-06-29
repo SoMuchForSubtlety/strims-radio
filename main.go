@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -50,6 +51,8 @@ type controller struct {
 
 	likes             userList
 	updateSubscribers userList
+
+	backupSongs []opendj.QueueEntry
 }
 
 type outgoingMessage struct {
@@ -61,6 +64,7 @@ var configLocation = flag.String("config", "config.json", "the location of the c
 
 const (
 	queueSaveLocation      = "queue.json"
+	backupSongsLocation    = "songs.json"
 	subscriberSaveLocation = "updateUsers.json"
 	hasteURL               = "https://hastebin.com"
 	ytURLStart             = "https://www.youtube.com/watch?v="
@@ -138,11 +142,21 @@ func initController() (c *controller, err error) {
 		}
 	}
 
+	// load backup songs
+	file, err = ioutil.ReadFile(backupSongsLocation)
+	if err != nil {
+		log.Printf("[INFO] no backup song list found: %v", err)
+	} else {
+		err = json.Unmarshal([]byte(file), &c.backupSongs)
+		if err != nil {
+			log.Printf("[ERROR] failed to unmarshal backup songs list: %v", err)
+		} else {
+			log.Printf("[INFO] loaded backup songs with %v entries", len(c.backupSongs))
+		}
+	}
+
 	// create dj
 	c.dj = opendj.NewDj(queue.Q)
-	if err != nil {
-		return nil, err
-	}
 
 	c.dj.AddNewSongHandler(c.newSong)
 	c.dj.AddEndOfSongHandler(c.songOver)
@@ -209,7 +223,7 @@ func (c *controller) onPrivMessage(m dggchat.PrivateMessage, s *dggchat.Session)
 		c.addUserToUpdates(m.User.Nick)
 		return
 	case "-like":
-		c.likeSong(m.Message)
+		c.likeSong(m.User.Nick)
 	default:
 	}
 
@@ -233,6 +247,18 @@ func (c *controller) addYTlink(m dggchat.PrivateMessage) {
 	for _, item := range queue {
 		duration += item.Media.Duration
 	}
+
+	userPositions := c.dj.UserPosition(m.User.Nick)
+	var userTotalDuration time.Duration
+	for _, j := range userPositions {
+		userTotalDuration += queue[j].Media.Duration
+	}
+
+	if userTotalDuration >= 20 {
+		c.sendMsg("Please wait a while before you add more songs.", m.User.Nick)
+		return
+	}
+
 	item, progress, err := c.dj.CurrentlyPlaying()
 	if err == nil {
 		duration += item.Media.Duration - progress
@@ -240,7 +266,7 @@ func (c *controller) addYTlink(m dggchat.PrivateMessage) {
 
 	if duration.Minutes() <= 1 {
 		maxduration = 60
-	} else if duration.Minutes() <= 20 {
+	} else if duration.Minutes() <= 15 {
 		maxduration = 20
 	} else if duration.Minutes() <= 60 {
 		maxduration = 10
@@ -355,17 +381,20 @@ func (c *controller) sendPlaylist(nick string) {
 
 func (c *controller) likeSong(nick string) {
 	playing, _, err := c.dj.CurrentlyPlaying()
+	if playing.Owner == nick {
+		c.sendMsg("You can't like your own song PepoBan", nick)
+		return
+	}
 	if err != nil {
 		c.sendMsg("There is nothing currently playing.", nick)
 		return
 	}
-	result := c.likes.search(nick)
-	if result > 0 {
+	if c.likes.search(nick) >= 0 {
 		c.sendMsg("You already liked this song.", nick)
 		return
 	}
 	c.likes.add(nick)
-	c.sendMsg(fmt.Sprintf("I will tell %v you liked \"%v\"", playing.Owner, playing.Media.Title), nick)
+	c.sendMsg(fmt.Sprintf("I'll tell %v you liked %v PeepoHappy", playing.Owner, playing.Media.Title), nick)
 }
 
 func (c *controller) addUserToUpdates(nick string) {
@@ -520,13 +549,20 @@ func (c *controller) songOver(entry opendj.QueueEntry, err error) {
 	queue := localQueue{Q: c.dj.Queue()}
 	saveStruct(queue, queueSaveLocation)
 
+	if len(queue.Q) <= 0 && len(c.backupSongs) > 0 {
+		rand.Seed(time.Now().Unix())
+		c.dj.AddEntry(queue.Q[rand.Intn(len(queue.Q))])
+	}
+
 	likes := len(c.likes.Users)
 	if likes > 0 {
+		c.backupSongs = append(c.backupSongs, entry)
+		saveStruct(c.backupSongs, backupSongsLocation)
 		ppl := "people"
 		if likes == 1 {
 			ppl = "person"
 		}
-		c.sendMsg(fmt.Sprintf("%v %v really liked your song", likes, ppl), entry.Owner)
+		c.sendMsg(fmt.Sprintf("%v %v really liked your song PeepoHappy", likes, ppl), entry.Owner)
 	}
 	c.likes.clear()
 }
