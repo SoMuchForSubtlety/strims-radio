@@ -1,7 +1,10 @@
 {
-  "auth_token": "",
-  "address": "",
-  "ingest":"",
-  "key":"",
-  "api_key": ""
+  "auth_token": "chat auth token",
+  "address": "chat ws url",
+  "rtmp": "rtmp ingest url",
+  "api_key": "youtube api key",
+  "moderators": [
+    "mod1",
+    "mod2"
+  ]
 }

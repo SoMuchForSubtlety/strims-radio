@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -56,7 +57,19 @@ type outgoingMessage struct {
 	message string
 }
 
+var configLocation = flag.String("config", "config.json", "the location of the config file")
+
+const (
+	queueSaveLocation      = "queue.json"
+	subscriberSaveLocation = "updateUsers.json"
+	hasteURL               = "https://hastebin.com"
+	ytURLStart             = "https://www.youtube.com/watch?v="
+	uguuURL                = "https://uguu.se/api.php?d=upload-tool"
+	tmpFile                = "tmp.txt"
+)
+
 func main() {
+	flag.Parse()
 	cont, err := initController()
 	if err != nil {
 		log.Fatalf("[ERROR] could not initialize controller: %v", err)
@@ -80,20 +93,19 @@ func main() {
 }
 
 func initController() (c *controller, err error) {
-	var cont controller
+	c = &controller{}
+	c.playlistDirty = true
 
-	cont.playlistDirty = true
-
-	cont.cfg, err = readConfig("newConfig.json")
+	c.cfg, err = readConfig(*configLocation)
 	if err != nil {
 		return nil, err
 	}
 
-	cont.msgBuffer = make(chan outgoingMessage, 100)
-	cont.haste = haste.NewHaste("https://hastebin.com")
+	c.msgBuffer = make(chan outgoingMessage, 100)
+	c.haste = haste.NewHaste(hasteURL)
 
-	client := &http.Client{Transport: &transport.APIKey{Key: cont.cfg.APIKey}}
-	cont.ytServ, err = youtube.New(client)
+	client := &http.Client{Transport: &transport.APIKey{Key: c.cfg.APIKey}}
+	c.ytServ, err = youtube.New(client)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +113,7 @@ func initController() (c *controller, err error) {
 	// load the saved playlist if there is one
 	var queue localQueue
 
-	file, err := ioutil.ReadFile("queue.json")
+	file, err := ioutil.ReadFile(queueSaveLocation)
 	if err != nil {
 		log.Printf("[INFO] no previous playlist found: %v", err)
 	} else {
@@ -114,44 +126,44 @@ func initController() (c *controller, err error) {
 	}
 
 	// load update subscribers
-	file, err = ioutil.ReadFile("updateUsers.json")
+	file, err = ioutil.ReadFile(subscriberSaveLocation)
 	if err != nil {
 		log.Printf("[INFO] no user list found: %v", err)
 	} else {
-		err = json.Unmarshal([]byte(file), &cont.updateSubscribers)
+		err = json.Unmarshal([]byte(file), &c.updateSubscribers)
 		if err != nil {
 			log.Printf("[ERROR] failed to unmarshal user list: %v", err)
 		} else {
-			log.Printf("[INFO] loaded user list with %v entries", len(cont.updateSubscribers.Users))
+			log.Printf("[INFO] loaded user list with %v entries", len(c.updateSubscribers.Users))
 		}
 	}
 
 	// create dj
-	cont.dj, err = opendj.NewDj(queue.Q)
+	c.dj, err = opendj.NewDj(queue.Q)
 	if err != nil {
 		return nil, err
 	}
 
-	cont.dj.AddNewSongHandler(cont.newSong)
-	cont.dj.AddEndOfSongHandler(cont.songOver)
-	cont.dj.AddPlaybackErrorHandler(cont.songError)
+	c.dj.AddNewSongHandler(c.newSong)
+	c.dj.AddEndOfSongHandler(c.songOver)
+	c.dj.AddPlaybackErrorHandler(c.songError)
 
 	// Create a new sgg client
-	cont.sgg, err = dggchat.New(";jwt=" + cont.cfg.AuthToken)
-	u, err := url.Parse(cont.cfg.Address)
+	c.sgg, err = dggchat.New(";jwt=" + c.cfg.AuthToken)
+	u, err := url.Parse(c.cfg.Address)
 	if err != nil {
 		log.Fatalf("[ERROR] can't parse url %v", err)
 	}
-	cont.sgg.SetURL(*u)
+	c.sgg.SetURL(*u)
 
 	if err != nil {
 		return nil, err
 	}
 
-	cont.sgg.AddPMHandler(cont.onPrivMessage)
-	cont.sgg.AddErrorHandler(onError)
+	c.sgg.AddPMHandler(c.onPrivMessage)
+	c.sgg.AddErrorHandler(onError)
 
-	return &cont, nil
+	return c, nil
 }
 
 func readConfig(title string) (cfg config, err error) {
@@ -236,8 +248,6 @@ func (c *controller) addYTlink(m dggchat.PrivateMessage) {
 		maxduration = 5
 	}
 
-	ytURLStart := "https://www.youtube.com/watch?v="
-
 	id := regexp.MustCompile(`(\?v=|be\/)[a-zA-Z0-9-_]+`).FindString(m.Message)[3:]
 	if id == "" {
 		c.sendMsg("invalid link", m.User.Nick)
@@ -269,7 +279,7 @@ func (c *controller) addYTlink(m dggchat.PrivateMessage) {
 
 	c.dj.AddEntry(entry)
 	q := localQueue{Q: c.dj.Queue()}
-	saveStruct(q, "queue.json")
+	saveStruct(q, queueSaveLocation)
 	c.playlistDirty = true
 
 	durations := c.dj.DurationUntilUser(m.User.Nick)
@@ -318,9 +328,7 @@ func (c *controller) sendQueuePositions(nick string) {
 			c.sendMsg("there was an error", nick)
 			return
 		}
-		for i, duration := range durations {
-			response += fmt.Sprintf(", your song is in position %v and will play in %v", positions[i]+1, fmtDuration(duration))
-		}
+		response += fmt.Sprintf(", your next song is in position %v and will play in %v", positions[0]+1, fmtDuration(0))
 	}
 	c.sendMsg(response, nick)
 }
@@ -369,12 +377,13 @@ func (c *controller) addUserToUpdates(nick string) {
 		c.sendMsg("You will no longer get notifications.", nick)
 		c.updateSubscribers.remove(nick)
 	}
-	saveStruct(&c.updateSubscribers, "updateUsers.json")
+	saveStruct(&c.updateSubscribers, subscriberSaveLocation)
 }
 
 func (c *controller) removeItem(message string, nick string) {
 	intString := strings.TrimSpace(strings.Replace(message, "-remove", "", -1))
 	index, err := strconv.Atoi(intString)
+	index--
 	if err != nil {
 		c.sendMsg("please enter a valid integer", nick)
 		return
@@ -397,7 +406,7 @@ func (c *controller) removeItem(message string, nick string) {
 		return
 	}
 	queue := localQueue{Q: c.dj.Queue()}
-	saveStruct(queue, "queue.json")
+	saveStruct(queue, queueSaveLocation)
 	c.playlistDirty = true
 	c.sendMsg("Successfully removed item at index", nick)
 
@@ -454,18 +463,18 @@ func (c *controller) uploadString(text string) (url string, err error) {
 	select {
 	case res := <-c1:
 		err = res.er
-		url = "https://hastebin.com/raw/" + res.response.Key
+		url = hasteURL + "/raw/" + res.response.Key
 	case <-time.After(1 * time.Second):
 		// TODO: find a better way to do this
-		err = ioutil.WriteFile("tmp.txt", []byte(text), 0644)
+		err = ioutil.WriteFile(tmpFile, []byte(text), 0644)
 		if err != nil {
 			return url, err
 		}
-		file, err = os.Open("tmp.txt")
+		file, err = os.Open(tmpFile)
 		if err != nil {
 			return url, err
 		}
-		url, err = fileupload.UploadToHost("https://uguu.se/api.php?d=upload-tool", file)
+		url, err = fileupload.UploadToHost(uguuURL, file)
 	}
 
 	return url, err
@@ -509,7 +518,7 @@ func (c *controller) songOver(entry opendj.QueueEntry, err error) {
 	c.playlistDirty = true
 	log.Println("[INFO] 🛑 Done Playing")
 	queue := localQueue{Q: c.dj.Queue()}
-	saveStruct(queue, "queue.json")
+	saveStruct(queue, queueSaveLocation)
 
 	likes := len(c.likes.Users)
 	if likes > 0 {
@@ -517,7 +526,7 @@ func (c *controller) songOver(entry opendj.QueueEntry, err error) {
 		if likes == 1 {
 			ppl = "person"
 		}
-		c.sendMsg(fmt.Sprintf("%v %v really liked your song PeepoHappy", likes, ppl), entry.Owner)
+		c.sendMsg(fmt.Sprintf("%v %v really liked your song", likes, ppl), entry.Owner)
 	}
 	c.likes.clear()
 }
