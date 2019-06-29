@@ -272,7 +272,18 @@ func (c *controller) addYTlink(m dggchat.PrivateMessage) {
 	saveStruct(q, "queue.json")
 	c.playlistDirty = true
 
-	c.sendMsg(fmt.Sprintf("Added your request '%v' to the queue.", entry.Media.Title), m.User.Nick)
+	durations := c.dj.DurationUntilUser(m.User.Nick)
+	positions := c.dj.UserPosition(m.User.Nick)
+	response := ""
+	if len(positions) > 0 {
+		if len(positions) != len(durations) {
+			log.Printf("[ERROR] duration and position length mismatch")
+		} else {
+			response = fmt.Sprintf("It is in position %v and will play in %v", positions[len(positions)-1]+1, fmtDuration(durations[len(durations)-1]))
+		}
+	}
+
+	c.sendMsg(fmt.Sprintf("Added your request '%v' to the queue. %v", entry.Media.Title, response), m.User.Nick)
 	log.Printf("Added song: '%v' for %v", entry.Media.Title, entry.Owner)
 }
 
@@ -308,7 +319,7 @@ func (c *controller) sendQueuePositions(nick string) {
 			return
 		}
 		for i, duration := range durations {
-			response += fmt.Sprintf(", your song is in position %v and will play in %v", i+1, fmtDuration(duration))
+			response += fmt.Sprintf(", your song is in position %v and will play in %v", positions[i]+1, fmtDuration(duration))
 		}
 	}
 	c.sendMsg(response, nick)
