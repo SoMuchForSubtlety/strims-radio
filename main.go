@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"regexp"
@@ -31,7 +32,7 @@ type config struct {
 }
 
 type localQueue struct {
-	q []opendj.QueueEntry
+	Q []opendj.QueueEntry
 }
 
 type controller struct {
@@ -71,8 +72,7 @@ func main() {
 
 	go cont.dj.Play(cont.cfg.Rtmp)
 
-	cont.sgg.SendMessage("I am online")
-
+	cont.messageSender()
 	// Wait for ctr-C to shut down
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT)
@@ -81,6 +81,8 @@ func main() {
 
 func initController() (c *controller, err error) {
 	var cont controller
+
+	cont.playlistDirty = true
 
 	cont.cfg, err = readConfig("newConfig.json")
 	if err != nil {
@@ -107,7 +109,7 @@ func initController() (c *controller, err error) {
 		if err != nil {
 			log.Printf("[ERROR] failed to unmarshal queue: %v", err)
 		} else {
-			log.Printf("[INFO] loaded playlist with %v songs", len(queue.q))
+			log.Printf("[INFO] loaded playlist with %v songs", len(queue.Q))
 		}
 	}
 
@@ -125,17 +127,22 @@ func initController() (c *controller, err error) {
 	}
 
 	// create dj
-	cont.dj, err = opendj.NewDj(queue.q)
+	cont.dj, err = opendj.NewDj(queue.Q)
 	if err != nil {
 		return nil, err
 	}
 
 	cont.dj.AddNewSongHandler(cont.newSong)
-	cont.dj.AddEndOfSongHandler(c.songOver)
-	cont.dj.AddPlaybackErrorHandler(c.songError)
+	cont.dj.AddEndOfSongHandler(cont.songOver)
+	cont.dj.AddPlaybackErrorHandler(cont.songError)
 
 	// Create a new sgg client
-	cont.sgg, err = dggchat.New(cont.cfg.AuthToken)
+	cont.sgg, err = dggchat.New(";jwt=" + cont.cfg.AuthToken)
+	u, err := url.Parse(cont.cfg.Address)
+	if err != nil {
+		log.Fatalf("[ERROR] can't parse url %v", err)
+	}
+	cont.sgg.SetURL(*u)
 
 	if err != nil {
 		return nil, err
@@ -189,6 +196,8 @@ func (c *controller) onPrivMessage(m dggchat.PrivateMessage, s *dggchat.Session)
 	case "-updateme":
 		c.addUserToUpdates(m.User.Nick)
 		return
+	case "-like":
+		c.likeSong(m.Message)
 	default:
 	}
 
@@ -197,13 +206,11 @@ func (c *controller) onPrivMessage(m dggchat.PrivateMessage, s *dggchat.Session)
 		return
 	} else if strings.Contains(trimmedMsg, "-dedicate") {
 		c.addDedication(m.Message, m.User.Nick)
-	} else if strings.Contains(trimmedMsg, "-like") {
-
 	}
 }
 
 func onError(e string, s *dggchat.Session) {
-	log.Printf("[ERROR] %s", e)
+	log.Printf("[ERROR] error from ws: %s", e)
 }
 
 func (c *controller) addYTlink(m dggchat.PrivateMessage) {
@@ -213,6 +220,10 @@ func (c *controller) addYTlink(m dggchat.PrivateMessage) {
 
 	for _, item := range queue {
 		duration += item.Media.Duration
+	}
+	item, progress, err := c.dj.CurrentlyPlaying()
+	if err == nil {
+		duration += item.Media.Duration - progress
 	}
 
 	if duration.Minutes() <= 1 {
@@ -234,6 +245,7 @@ func (c *controller) addYTlink(m dggchat.PrivateMessage) {
 	}
 
 	res, err := c.ytServ.Videos.List("id,snippet,contentDetails").Id(id).Do()
+	songDuration, _ := time.ParseDuration(strings.ToLower(res.Items[0].ContentDetails.Duration[2:]))
 	if err != nil {
 		log.Printf("[ERROR] youtube API query failed: %v", err)
 		c.sendMsg("there was an error", m.User.Nick)
@@ -241,14 +253,14 @@ func (c *controller) addYTlink(m dggchat.PrivateMessage) {
 	} else if len(res.Items) < 1 {
 		c.sendMsg("invalid link", m.User.Nick)
 		return
-	} else if duration, _ = time.ParseDuration(strings.ToLower(res.Items[0].ContentDetails.Duration[2:])); duration.Minutes() >= maxduration {
+	} else if songDuration.Minutes() >= maxduration {
 		c.sendMsg(fmt.Sprintf("This song is too long, please keep it under %v minutes", maxduration), m.User.Nick)
 		return
 	}
 
 	var video opendj.Media
 	video.Title = res.Items[0].Snippet.Title
-	video.Duration = duration
+	video.Duration = songDuration
 	video.URL = ytURLStart + res.Items[0].Id
 
 	var entry opendj.QueueEntry
@@ -256,6 +268,12 @@ func (c *controller) addYTlink(m dggchat.PrivateMessage) {
 	entry.Owner = m.User.Nick
 
 	c.dj.AddEntry(entry)
+	q := localQueue{Q: c.dj.Queue()}
+	saveStruct(q, "queue.json")
+	c.playlistDirty = true
+
+	c.sendMsg(fmt.Sprintf("Added your request '%v' to the queue.", entry.Media.Title), m.User.Nick)
+	log.Printf("Added song: '%v' for %v", entry.Media.Title, entry.Owner)
 }
 
 func (c *controller) sendCurrentSong(nick string) {
@@ -290,7 +308,7 @@ func (c *controller) sendQueuePositions(nick string) {
 			return
 		}
 		for i, duration := range durations {
-			response += fmt.Sprintf(", your song at position %v will play in %v", i, fmtDuration(duration))
+			response += fmt.Sprintf(", your song is in position %v and will play in %v", i+1, fmtDuration(duration))
 		}
 	}
 	c.sendMsg(response, nick)
@@ -367,7 +385,11 @@ func (c *controller) removeItem(message string, nick string) {
 		c.sendMsg("index out of range", nick)
 		return
 	}
+	queue := localQueue{Q: c.dj.Queue()}
+	saveStruct(queue, "queue.json")
+	c.playlistDirty = true
 	c.sendMsg("Successfully removed item at index", nick)
+
 	return
 }
 
@@ -449,12 +471,13 @@ func (c *controller) messageSender() {
 		// TODO: verify the message was sent
 		msg := <-c.msgBuffer
 		c.sgg.SendPrivateMessage(msg.nick, msg.message)
+		log.Printf("[MSG] message sent to %v: %v", msg.nick, msg.message)
 		time.Sleep(time.Millisecond * 450)
 	}
 }
 
 func (c *controller) newSong(entry opendj.QueueEntry) {
-
+	c.playlistDirty = true
 	msg := fmt.Sprintf("Now Playing %s's request: %s", entry.Owner, entry.Media.Title)
 	log.Println("[INFO] ▶ " + msg)
 
@@ -472,8 +495,9 @@ func (c *controller) newSong(entry opendj.QueueEntry) {
 }
 
 func (c *controller) songOver(entry opendj.QueueEntry, err error) {
+	c.playlistDirty = true
 	log.Println("[INFO] 🛑 Done Playing")
-	queue := localQueue{q: c.dj.Queue()}
+	queue := localQueue{Q: c.dj.Queue()}
 	saveStruct(queue, "queue.json")
 
 	likes := len(c.likes.Users)
