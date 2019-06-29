@@ -1,3 +1,4 @@
+[![Go Report Card](https://goreportcard.com/badge/github.com/SoMuchForSubtlety/strims-radio)](https://goreportcard.com/report/github.com/SoMuchForSubtlety/strims-radio)
 # strims-radio
 
 strims-radio is a plug.dj clone that uses [opendj](https://github.com/SoMuchForSubtlety/opendj) and the youtube API to stream songs requested by chat to a RTMP server.
