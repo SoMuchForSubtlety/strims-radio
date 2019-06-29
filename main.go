@@ -2,673 +2,528 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
-	"flag"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
-	"os/exec"
+	"os/signal"
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
+	"syscall"
 	"time"
-	"unicode/utf8"
 
+	"github.com/MemeLabs/dggchat"
 	"github.com/SoMuchForSubtlety/fileupload"
+	"github.com/SoMuchForSubtlety/opendj"
 	"github.com/Syfaro/haste-client"
-	"github.com/gorilla/websocket"
-	"golang.org/x/sys/windows"
 	"google.golang.org/api/googleapi/transport"
 	"google.golang.org/api/youtube/v3"
 )
 
-type bot struct {
-	mu               sync.Mutex
-	authToken        string
-	address          string
-	conn             *websocket.Conn
-	client           *http.Client
-	ytServ           *youtube.Service
-	waitingQueue     queue
-	currentEntry     queueEntry
-	con              config
-	runningCommand   *exec.Cmd
-	msgSenderChan    chan contents
-	errorChan        chan error
-	songStarted      time.Time
-	skipUsers        userList
-	updateUsers      userList
-	likedUsers       userList
-	haste            *haste.Haste
-	playlistURL      string
-	playlistURLDirty bool
-}
-
-type message struct {
-	Type     string `json:"type"`
-	Contents *contents
-}
-
-type contents struct {
-	Nick      string `json:"nick"`
-	Data      string `json:"data"`
-	Timestamp int64  `json:"timestamp"`
-}
-
 type config struct {
 	AuthToken  string   `json:"auth_token"`
 	Address    string   `json:"address"`
-	Ingest     string   `json:"ingest"`
-	Key        string   `json:"key"`
+	Rtmp       string   `json:"rtmp"`
 	APIKey     string   `json:"api_key"`
 	Moderators []string `json:"moderators"`
 }
 
-type video struct {
-	Title    string
-	ID       string
-	Duration time.Duration
+type localQueue struct {
+	Q []opendj.QueueEntry
 }
 
-type queueEntry struct {
-	Video      video
-	User       string
-	Dedication string
+type controller struct {
+	ytServ    *youtube.Service
+	cfg       config
+	sgg       *dggchat.Session
+	msgBuffer chan outgoingMessage
+	dj        *opendj.Dj
+
+	haste *haste.Haste
+
+	playlistLink  string
+	playlistDirty bool
+
+	likes             userList
+	updateSubscribers userList
 }
 
-type queue struct {
-	Items []queueEntry
-	sync.Mutex
+type outgoingMessage struct {
+	nick    string
+	message string
 }
-
-const youtubeURLStart = "https://www.youtube.com/watch?v="
-
-var configFile string
 
 func main() {
-	flag.Parse()
-	logFile, err := os.OpenFile("log.txt", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	cont, err := initController()
 	if err != nil {
-		log.Fatalf("error opening file: %v", err)
+		log.Fatalf("[ERROR] could not initialize controller: %v", err)
 	}
-	defer logFile.Close()
-	mw := io.MultiWriter(os.Stdout, logFile)
-	log.SetOutput(mw)
 
-	config, err := readConfig()
+	// Open a connection
+	err = cont.sgg.Open()
 	if err != nil {
-		log.Fatalf("error reading config file: %v", err)
+		log.Fatalln(err)
 	}
+	// Cleanly close the connection
+	defer cont.sgg.Close()
 
-	bot := newBot(*config)
-	if err = bot.setAddress(config.Address); err != nil {
-		log.Fatal(err)
-	}
+	go cont.dj.Play(cont.cfg.Rtmp)
 
-	go bot.play()
-
-	for {
-		log.Println("[INFO] 🌐 trying to establish connection")
-		err = bot.connect()
-		if err != nil {
-			log.Printf("[ERROR] bot error: %v", err)
-		}
-		err = bot.close()
-		if err != nil {
-			log.Printf("[ERROR] closing bot failed: %v", err)
-		}
-		time.Sleep(time.Second * 5)
-	}
+	cont.messageSender()
+	// Wait for ctr-C to shut down
+	sc := make(chan os.Signal, 1)
+	signal.Notify(sc, syscall.SIGINT)
+	<-sc
 }
 
-func readConfig() (*config, error) {
-	file, err := os.Open(configFile)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
+func initController() (c *controller, err error) {
+	var cont controller
 
-	bv, err := ioutil.ReadAll(file)
-	if err != nil {
-		return nil, err
-	}
+	cont.playlistDirty = true
 
-	var c *config
-	c = new(config)
-
-	err = json.Unmarshal(bv, &c)
+	cont.cfg, err = readConfig("newConfig.json")
 	if err != nil {
 		return nil, err
 	}
 
-	return c, err
-}
+	cont.msgBuffer = make(chan outgoingMessage, 100)
+	cont.haste = haste.NewHaste("https://hastebin.com")
 
-func newBot(config config) *bot {
-	h := haste.NewHaste("https://hastebin.com")
-	bot := bot{authToken: ";jwt=" + config.AuthToken, con: config, haste: h}
-	bot.errorChan = make(chan error)
-	bot.msgSenderChan = make(chan contents, 100)
-	bot.client = &http.Client{Transport: &transport.APIKey{Key: config.APIKey}}
-	ytServ, err := youtube.New(bot.client)
+	client := &http.Client{Transport: &transport.APIKey{Key: cont.cfg.APIKey}}
+	cont.ytServ, err = youtube.New(client)
 	if err != nil {
-		log.Fatalf("[ERROR] could not connect to youtube API: %v", err)
+		return nil, err
 	}
-	bot.ytServ = ytServ
+
+	// load the saved playlist if there is one
+	var queue localQueue
 
 	file, err := ioutil.ReadFile("queue.json")
 	if err != nil {
 		log.Printf("[INFO] no previous playlist found: %v", err)
 	} else {
-		err = json.Unmarshal([]byte(file), &bot.waitingQueue)
+		err = json.Unmarshal([]byte(file), &queue)
 		if err != nil {
 			log.Printf("[ERROR] failed to unmarshal queue: %v", err)
 		} else {
-			log.Printf("[INFO] loaded playlist with %v songs", len(bot.waitingQueue.Items))
+			log.Printf("[INFO] loaded playlist with %v songs", len(queue.Q))
 		}
 	}
 
+	// load update subscribers
 	file, err = ioutil.ReadFile("updateUsers.json")
 	if err != nil {
 		log.Printf("[INFO] no user list found: %v", err)
 	} else {
-		err = json.Unmarshal([]byte(file), &bot.updateUsers)
+		err = json.Unmarshal([]byte(file), &cont.updateSubscribers)
 		if err != nil {
 			log.Printf("[ERROR] failed to unmarshal user list: %v", err)
 		} else {
-			log.Printf("[INFO] loaded user list with %v entries", len(bot.waitingQueue.Items))
+			log.Printf("[INFO] loaded user list with %v entries", len(cont.updateSubscribers.Users))
 		}
 	}
 
-	return &bot
-}
-
-func (b *bot) setAddress(url string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	if url == "" {
-		return errors.New("url address not supplied")
-	}
-
-	b.address = url
-	return nil
-}
-
-func (b *bot) connect() error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	header := http.Header{}
-	header.Add("Cookie", fmt.Sprintf("authtoken=%s", b.authToken))
-
-	conn, resp, err := websocket.DefaultDialer.Dial(b.address, header)
+	// create dj
+	cont.dj, err = opendj.NewDj(queue.Q)
 	if err != nil {
-		return fmt.Errorf("handshake failed with status: %v", resp)
+		return nil, err
 	}
-	log.Println("[INFO] ✔️ Connection established.")
-	b.conn = conn
 
-	go b.messageSender()
-	err = b.listen()
+	cont.dj.AddNewSongHandler(cont.newSong)
+	cont.dj.AddEndOfSongHandler(cont.songOver)
+	cont.dj.AddPlaybackErrorHandler(cont.songError)
+
+	// Create a new sgg client
+	cont.sgg, err = dggchat.New(";jwt=" + cont.cfg.AuthToken)
+	u, err := url.Parse(cont.cfg.Address)
 	if err != nil {
-		return err
+		log.Fatalf("[ERROR] can't parse url %v", err)
 	}
-	return nil
-}
+	cont.sgg.SetURL(*u)
 
-func (b *bot) listen() error {
-	go func() {
-		for {
-			_, message, err := b.conn.ReadMessage()
-			if err != nil {
-				b.errorChan <- fmt.Errorf("error trying to read message: %v", err)
-				return
-			}
-			m, err := parseMessage(message)
-			if err != nil {
-				log.Printf("[ERROR] parsing message failed: %v", err)
-				continue
-			}
-
-			if m.Contents != nil {
-				if m.Type == "PRIVMSG" {
-					go func() {
-						b.answer(m.Contents, true)
-					}()
-				} else if m.Type == "ERR" {
-					log.Printf("[ERROR] Chat error: %v", m.Contents.Data)
-				}
-			}
-		}
-	}()
-	return <-b.errorChan
-}
-
-func (b *bot) close() error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	if b.conn == nil {
-		return errors.New("connection already closed")
-	}
-
-	err := b.conn.Close()
 	if err != nil {
-		return fmt.Errorf("error trying to close connection: %v", err)
+		return nil, err
 	}
 
-	b.conn = nil
-	return nil
+	cont.sgg.AddPMHandler(cont.onPrivMessage)
+	cont.sgg.AddErrorHandler(onError)
+
+	return &cont, nil
 }
 
-func (b *bot) answer(contents *contents, private bool) {
-	urlType1 := regexp.MustCompile(`https:\/\/www.youtube.com\/watch\?v=[a-zA-Z0-9_-]+`)
-	urlType2 := regexp.MustCompile(`https:\/\/youtu.be\/[a-zA-Z0-9_-]+`)
-	var videoID string
+func readConfig(title string) (cfg config, err error) {
+	file, err := os.Open(title)
+	if err != nil {
+		return cfg, err
+	}
+	defer file.Close()
+
+	bv, err := ioutil.ReadAll(file)
+	if err != nil {
+		return cfg, err
+	}
+
+	err = json.Unmarshal(bv, &cfg)
+	return cfg, err
+}
+
+func (c *controller) onPrivMessage(m dggchat.PrivateMessage, s *dggchat.Session) {
+	log.Printf("New message from %s: %s\n", m.User, m.Message)
+
+	trimmedMsg := strings.TrimSpace(m.Message)
+
+	ytURL := regexp.MustCompile(`(youtube.com\/watch\?v=|youtu.be\/)[a-zA-Z0-9_-]+`)
+
+	if ytURL.Match([]byte(trimmedMsg)) {
+		c.addYTlink(m)
+	}
+	switch trimmedMsg {
+	case "-playing":
+		c.sendCurrentSong(m.User.Nick)
+		return
+	case "-next":
+		c.sendNextSong(m.User.Nick)
+		return
+	case "-queue":
+		c.sendQueuePositions(m.User.Nick)
+		return
+	case "-playlist":
+		c.sendPlaylist(m.User.Nick)
+		return
+	case "-updateme":
+		c.addUserToUpdates(m.User.Nick)
+		return
+	case "-like":
+		c.likeSong(m.Message)
+	default:
+	}
+
+	if strings.Contains(trimmedMsg, "-remove") {
+		c.removeItem(trimmedMsg, m.User.Nick)
+		return
+	} else if strings.Contains(trimmedMsg, "-dedicate") {
+		c.addDedication(m.Message, m.User.Nick)
+	}
+}
+
+func onError(e string, s *dggchat.Session) {
+	log.Printf("[ERROR] error from ws: %s", e)
+}
+
+func (c *controller) addYTlink(m dggchat.PrivateMessage) {
+	queue := c.dj.Queue()
 	var duration time.Duration
-	contents.Data = strings.TrimSpace(contents.Data)
+	var maxduration float64
 
-	if contents.Data == "-playing" {
-		elapsed := time.Since(b.songStarted)
-		bonus := ""
-		if b.currentEntry.Dedication != "" {
-			bonus = fmt.Sprintf("- dedicated to %s -", b.currentEntry.Dedication)
-		}
-		response := fmt.Sprintf("`%v` `%v/%v` currently playing: 🎶 %q 🎶 requested by %s %s %v ", durationBar(15, elapsed, b.currentEntry.Video.Duration), fmtDuration(elapsed), fmtDuration(b.currentEntry.Video.Duration), b.currentEntry.Video.Title, b.currentEntry.User, bonus, youtubeURLStart+b.currentEntry.Video.ID)
-
-		b.sendMsg(response, contents.Nick)
-		return
-	} else if contents.Data == "-next" {
-		next, err := b.peek()
-		if err != nil {
-			b.sendMsg("No song queued", contents.Nick)
-			return
-		}
-		bonus := ""
-		if b.currentEntry.Dedication != "" {
-			bonus = fmt.Sprintf(" and dedicated to %s", b.currentEntry.Dedication)
-		}
-		b.sendMsg(fmt.Sprintf("up next: '%v' requested by %s%s", next.Video.Title, next.User, bonus), contents.Nick)
-		return
-	} else if contents.Data == "-skip" && false {
-		index := b.skipUsers.search(contents.Nick)
-		if index > 0 {
-			b.sendMsg("You alreadyu voted to skip", contents.Nick)
-			return
-		}
-		b.skipUsers.add(contents.Nick)
-		if len(b.skipUsers.Users) >= len(b.waitingQueue.Items) {
-			if b.runningCommand != nil {
-				// !!! WINDOWS ONLY !!!
-				// TODO: add unix implementation
-				err := b.runningCommand.Process.Signal(windows.SIGABRT)
-				if err != nil {
-					log.Printf("[ERROR] encountered an error while trying to kill ffmpeg: %v", err)
-				}
-				b.runningCommand = nil
-			}
-			b.sendMsg(fmt.Sprintf("%v/%v votes to skip - skipping song", len(b.skipUsers.Users), len(b.waitingQueue.Items)), contents.Nick)
-			b.skipUsers.clear()
-			return
-		}
-		b.sendMsg(fmt.Sprintf("%v/%v votes to skip", len(b.skipUsers.Users), len(b.waitingQueue.Items)), contents.Nick)
-		return
-	} else if contents.Data == "-queue" {
-		s1 := b.queuePositionMessage(contents.Nick)
-
-		b.sendMsg(s1, contents.Nick)
-		return
-	} else if contents.Data == "-playlist" {
-		if b.playlistURLDirty {
-			var url string
-			var err error
-			var file *os.File
-			playlist := b.formatPlaylist()
-			type resp struct {
-				response *haste.Response
-				er       error
-			}
-			c1 := make(chan resp)
-			go func() {
-				hasteResp, err := b.haste.UploadString(playlist)
-				c1 <- resp{response: hasteResp, er: err}
-			}()
-
-			select {
-			case res := <-c1:
-				err = res.er
-				url = "https://hastebin.com/raw/" + res.response.Key
-			case <-time.After(1 * time.Second):
-				err = ioutil.WriteFile("playlist.txt", []byte(playlist), 0644)
-				if err != nil {
-					break
-				}
-				file, err = os.Open("playlist.txt")
-				if err != nil {
-					break
-				}
-				url, err = fileupload.UploadToHost("https://uguu.se/api.php?d=upload-tool", file)
-			}
-			if err != nil {
-				log.Printf("[ERROR] failed to upload playlist: %v", err)
-				b.sendMsg("there was an error", contents.Nick)
-				return
-			}
-			log.Println("[INFO] 📝 Generated playlist")
-			b.playlistURLDirty = false
-			b.playlistURL = url
-		}
-		b.sendMsg(fmt.Sprintf("you can find the current playlist here: %v", b.playlistURL), contents.Nick)
-		return
-	} else if contents.Data == "-updateme" {
-		index := b.updateUsers.search(contents.Nick)
-		if index < 0 {
-			b.updateUsers.add(contents.Nick)
-			b.sendMsg("You will now get a message every time a new song plays. send `-updateme` again to turn it off.", contents.Nick)
-		} else {
-			b.updateUsers.remove(contents.Nick)
-			b.sendMsg("You will no longer get notifications.", contents.Nick)
-		}
-		err := saveStruct(b.updateUsers, "updateUsers.json")
-		if err != nil {
-			log.Printf("[ERROR] failed to save struct: %v", err)
-		}
-		return
-	} else if contents.Data == "-like" {
-		b.likedUsers.add(contents.Nick)
-		b.sendMsg(fmt.Sprintf("I will tell %v you like their song PeepoHappy ", b.currentEntry.User), contents.Nick)
-		log.Printf("[INFO] 💖 %v liked %v's song", contents.Nick, b.currentEntry.User)
-		return
-	} else if strings.Contains(contents.Data, "-dedicate") {
-		dedication := strings.TrimSpace(strings.Replace(contents.Data, "-dedicate", "", -1))
-		err := b.addDedication(contents.Nick, dedication)
-		if err != nil {
-			b.sendMsg("You don't have a song in the queue.", contents.Nick)
-			return
-		} else if dedication == "" {
-			b.sendMsg("dedicate deez nuts", contents.Nick)
-			return
-		}
-
-		b.sendMsg(fmt.Sprintf("Dedicated your song to %s", dedication), contents.Nick)
-		return
-	} else if strings.Contains(contents.Data, "-remove") {
-		if !b.checkMod(contents.Nick) {
-			b.sendMsg("You're not mod", contents.Nick)
-			return
-		}
-		intString := strings.TrimSpace(strings.Replace(contents.Data, "-remove", "", -1))
-		index, err := strconv.Atoi(intString)
-		if err != nil {
-			b.sendMsg("please enter a valid integer", contents.Nick)
-			return
-		}
-		err = b.removeIndex(index - 1)
-		if err != nil {
-			b.sendMsg("index out of range", contents.Nick)
-			return
-		}
-		b.sendMsg("Successfully removed", contents.Nick)
-		return
-
-	} else if urlType1.Match([]byte(contents.Data)) {
-		videoID = regexp.MustCompile(`v=[a-zA-Z0-9_-]+`).FindString(contents.Data)[2:]
-	} else if urlType2.Match([]byte(contents.Data)) {
-		videoID = regexp.MustCompile(`.be\/[a-zA-Z0-9_-]+`).FindString(contents.Data)[4:]
+	for _, item := range queue {
+		duration += item.Media.Duration
+	}
+	item, progress, err := c.dj.CurrentlyPlaying()
+	if err == nil {
+		duration += item.Media.Duration - progress
 	}
 
-	if videoID == "" {
-		b.sendMsg("invalid url", contents.Nick)
+	if duration.Minutes() <= 1 {
+		maxduration = 60
+	} else if duration.Minutes() <= 20 {
+		maxduration = 20
+	} else if duration.Minutes() <= 60 {
+		maxduration = 10
+	} else {
+		maxduration = 5
+	}
+
+	ytURLStart := "https://www.youtube.com/watch?v="
+
+	id := regexp.MustCompile(`(\?v=|be\/)[a-zA-Z0-9-_]+`).FindString(m.Message)[3:]
+	if id == "" {
+		c.sendMsg("invalid link", m.User.Nick)
 		return
 	}
 
-	res, err := b.ytServ.Videos.List("id,snippet,contentDetails").Id(videoID).Do()
+	res, err := c.ytServ.Videos.List("id,snippet,contentDetails").Id(id).Do()
+	songDuration, _ := time.ParseDuration(strings.ToLower(res.Items[0].ContentDetails.Duration[2:]))
 	if err != nil {
 		log.Printf("[ERROR] youtube API query failed: %v", err)
-		b.sendMsg("there was an error", contents.Nick)
+		c.sendMsg("there was an error", m.User.Nick)
 		return
 	} else if len(res.Items) < 1 {
-		b.sendMsg("invalid url", contents.Nick)
+		c.sendMsg("invalid link", m.User.Nick)
 		return
-	} else if duration, _ = time.ParseDuration(strings.ToLower(res.Items[0].ContentDetails.Duration[2:])); duration.Minutes() >= 10 {
-		b.sendMsg("This song is too long, please keep it under 10 minutes", contents.Nick)
+	} else if songDuration.Minutes() >= maxduration {
+		c.sendMsg(fmt.Sprintf("This song is too long, please keep it under %v minutes", maxduration), m.User.Nick)
 		return
 	}
 
-	v := video{Title: res.Items[0].Snippet.Title, ID: res.Items[0].Id, Duration: duration}
-	entry := queueEntry{Video: v, User: contents.Nick}
-	b.push(entry)
-}
+	var video opendj.Media
+	video.Title = res.Items[0].Snippet.Title
+	video.Duration = songDuration
+	video.URL = ytURLStart + res.Items[0].Id
 
-func (b *bot) push(newEntry queueEntry) {
-	b.playlistURLDirty = true
-	b.waitingQueue.Lock()
-	if len(b.waitingQueue.Items) > 5 {
-		for i, entry := range b.waitingQueue.Items {
-			if entry.User == newEntry.User {
-				newEntry.Dedication = b.waitingQueue.Items[i].Dedication
-				b.waitingQueue.Items[i] = newEntry
-				b.waitingQueue.Unlock()
-				log.Printf("[INFO] ♻️ changing %s's song to '%s'", newEntry.User, newEntry.Video.Title)
-				b.sendMsg(fmt.Sprintf("Replaced your previous selection. %v", b.queuePositionMessage(newEntry.User)), newEntry.User)
-				return
-			}
+	var entry opendj.QueueEntry
+	entry.Media = video
+	entry.Owner = m.User.Nick
+
+	c.dj.AddEntry(entry)
+	q := localQueue{Q: c.dj.Queue()}
+	saveStruct(q, "queue.json")
+	c.playlistDirty = true
+
+	durations := c.dj.DurationUntilUser(m.User.Nick)
+	positions := c.dj.UserPosition(m.User.Nick)
+	response := ""
+	if len(positions) > 0 {
+		if len(positions) != len(durations) {
+			log.Printf("[ERROR] duration and position length mismatch")
+		} else {
+			response = fmt.Sprintf("It is in position %v and will play in %v", positions[len(positions)-1]+1, fmtDuration(durations[len(durations)-1]))
 		}
 	}
-	log.Printf("[INFO] ➕ adding '%s' for %s", newEntry.Video.Title, newEntry.User)
-	b.waitingQueue.Items = append(b.waitingQueue.Items, newEntry)
-	b.waitingQueue.Unlock()
-	err := saveStruct(b.waitingQueue, "queue.json")
+
+	c.sendMsg(fmt.Sprintf("Added your request '%v' to the queue. %v", entry.Media.Title, response), m.User.Nick)
+	log.Printf("Added song: '%v' for %v", entry.Media.Title, entry.Owner)
+}
+
+func (c *controller) sendCurrentSong(nick string) {
+	song, elapsed, err := c.dj.CurrentlyPlaying()
+	video := song.Media
 	if err != nil {
-		log.Printf("[ERROR] failed to save struct: %v", err)
+		c.sendMsg("there is nothing playing right now :(", nick)
+		return
 	}
-	b.sendMsg(fmt.Sprintf("Added your request to the queue. %v", b.queuePositionMessage(newEntry.User)), newEntry.User)
+	response := fmt.Sprintf("`%v` `%v/%v` currently playing: 🎶 %q 🎶 requested by %s", durationBar(15, elapsed, video.Duration), fmtDuration(elapsed), fmtDuration(video.Duration), video.Title, song.Owner)
+	c.sendMsg(response, nick)
 }
 
-func (b *bot) pop() (queueEntry, error) {
-	b.playlistURLDirty = true
-	b.waitingQueue.Lock()
-	defer b.waitingQueue.Unlock()
-	if len(b.waitingQueue.Items) < 1 {
-		return queueEntry{}, errors.New("can't pop from empty queue")
+func (c *controller) sendNextSong(nick string) {
+	queue := c.dj.Queue()
+	if len(queue) <= 0 {
+		c.sendMsg("there is nothing in the queue :(", nick)
+		return
 	}
-	entry := b.waitingQueue.Items[0]
-	b.waitingQueue.Items = b.waitingQueue.Items[1:]
-	return entry, nil
+
+	c.sendMsg(fmt.Sprintf("up next: '%v' requested by %s", queue[0].Media.Title, queue[0].Owner), nick)
 }
 
-func (b *bot) peek() (queueEntry, error) {
-	b.waitingQueue.Lock()
-	defer b.waitingQueue.Unlock()
-	if len(b.waitingQueue.Items) < 1 {
-		return queueEntry{}, errors.New("can't pop from empty queue")
-	}
-	entry := b.waitingQueue.Items[0]
-	return entry, nil
-}
-
-func (b *bot) removeIndex(index int) error {
-	b.playlistURLDirty = true
-	b.waitingQueue.Lock()
-	if index >= len(b.waitingQueue.Items) || index < 0 {
-		return errors.New("index out of range")
-	}
-	song := b.waitingQueue.Items[index]
-	b.waitingQueue.Items = append(b.waitingQueue.Items[:index], b.waitingQueue.Items[index+1:]...)
-	b.waitingQueue.Unlock()
-	log.Printf("[INFO] 🗑️ removed %v's song '%v' at index %v", song.User, song.Video.Title, index)
-	return nil
-}
-
-func parseMessage(msg []byte) (*message, error) {
-	received := string(msg)
-	m := new(message)
-	maxBound := strings.IndexByte(received, ' ')
-	if maxBound < 0 {
-		return nil, errors.New("couldn't parse message type")
-	}
-	m.Type = received[:maxBound]
-	m.Contents = parseContents(received, len(m.Type))
-	return m, nil
-}
-
-func parseContents(received string, length int) *contents {
-	contents := contents{}
-	err := json.Unmarshal([]byte(received[length:]), &contents)
-	if err != nil {
-		contents.Nick = "strims"
-		contents.Data = received
-	}
-	return &contents
-}
-
-func init() {
-	flag.StringVar(&configFile, "config", "config.json", "location of config")
-}
-
-func (b *bot) play() {
-	for {
-		b.skipUsers.clear()
-		entry, err := b.pop()
-		if err != nil {
-			// TODO: not ideal, maybe have a backup playlist
-			time.Sleep(time.Second * 5)
-			continue
-		}
-		b.currentEntry = entry
-
-		b.sendMsg("Playing your song now", b.currentEntry.User)
-
-		for _, user := range b.updateUsers.Users {
-			bonus := ""
-			if b.currentEntry.Dedication != "" {
-				bonus = fmt.Sprintf("- dedicated to %s", b.currentEntry.Dedication)
-			}
-			b.sendMsg(fmt.Sprintf("Now Playing %s's request: %s %s", b.currentEntry.User, b.currentEntry.Video.Title, bonus), user)
-		}
-
-		if b.currentEntry.Dedication != "" {
-			b.sendMsg(fmt.Sprintf("%s dedicated this song to you 💖", b.currentEntry.User), b.currentEntry.Dedication)
-		}
-
-		command := exec.Command("youtube-dl", "-f", "bestaudio", "-g", youtubeURLStart+b.currentEntry.Video.ID)
-		url, err := command.Output()
-		if err != nil {
-			log.Printf("[ERROR] couldn't get url from youtube-dl: %v", err)
-			continue
-		}
-
-		urlProper := strings.TrimSpace(string(url))
-		b.songStarted = time.Now()
-		command = exec.Command("ffmpeg", "-reconnect", "1", "-reconnect_at_eof", "1", "-reconnect_delay_max", "3", "-re", "-i", urlProper, "-codec:a", "aac", "-f", "flv", b.con.Ingest+b.con.Key)
-		log.Printf("[INFO] ▶ Now Playing %s's request: %s", b.currentEntry.User, b.currentEntry.Video.Title)
-		b.runningCommand = command
-		err = command.Start()
-		if err != nil {
-			log.Printf("[ERROR] failed to start ffmpeg: %v", err)
-		}
-		err = command.Wait()
-		if err != nil {
-			log.Printf("[ERROR] ffmpeg aborted or errored: %v", err)
-		}
-		log.Println("[INFO] 🛑 Done Playing")
-		if len(b.likedUsers.Users) > 0 {
-			ppl := "people"
-			if len(b.likedUsers.Users) == 1 {
-				ppl = "person"
-			}
-			b.sendMsg(fmt.Sprintf("%v %v really liked your song PeepoHappy", len(b.likedUsers.Users), ppl), b.currentEntry.User)
-		}
-		b.likedUsers.clear()
-		err = saveStruct(b.waitingQueue, "queue.json")
-		if err != nil {
-			log.Printf("[ERROR] failed to save struct: %v", err)
-		}
-		b.runningCommand = nil
-	}
-}
-
-func (b *bot) sendMsg(message string, nick string) {
-	b.msgSenderChan <- contents{Nick: nick, Data: message}
-}
-
-func (b *bot) messageSender() {
-	for {
-		cont := <-b.msgSenderChan
-		messageS, _ := json.Marshal(cont)
-		log.Printf("[MSG] sending message to %v: '%s'", cont.Nick, cont.Data)
-		err := b.conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`PRIVMSG %s`, messageS)))
-		if err != nil {
-			b.errorChan <- err
+func (c *controller) sendQueuePositions(nick string) {
+	queue := c.dj.Queue()
+	positions := c.dj.UserPosition(nick)
+	durations := c.dj.DurationUntilUser(nick)
+	response := fmt.Sprintf("There are currently %v songs in the queue", len(queue))
+	if len(positions) > 0 {
+		if len(positions) != len(durations) {
+			c.sendMsg("there was an error", nick)
 			return
 		}
-		time.Sleep(time.Millisecond * 400)
-	}
-}
-
-func (b *bot) getUserPosition(nick string) int {
-	for i, content := range b.waitingQueue.Items {
-		if content.User == nick {
-			return i
+		for i, duration := range durations {
+			response += fmt.Sprintf(", your song is in position %v and will play in %v", positions[i]+1, fmtDuration(duration))
 		}
 	}
-	return -1
+	c.sendMsg(response, nick)
 }
 
-func (b *bot) durationUntilUser(nick string) (time.Duration, error) {
-	var dur time.Duration
-	b.waitingQueue.Lock()
-	defer b.waitingQueue.Unlock()
-	for _, content := range b.waitingQueue.Items {
-		if content.User != nick {
-			dur += content.Video.Duration
-		} else {
-			currentRemaining := b.currentEntry.Video.Duration - time.Since(b.songStarted)
-			return dur + currentRemaining, nil
+func (c *controller) sendPlaylist(nick string) {
+	if c.playlistDirty {
+		currentSong, _, _ := c.dj.CurrentlyPlaying()
+		playlist := formatPlaylist(c.dj.Queue(), currentSong)
+
+		url, err := c.uploadString(playlist)
+		if err != nil {
+			log.Printf("[ERROR] failed to upload playlist: %v", err)
+			c.sendMsg("there was an error", nick)
+			return
+		}
+
+		log.Println("[INFO] 📝 Generated playlist")
+		c.playlistLink = url
+		c.playlistDirty = false
+	}
+
+	c.sendMsg(fmt.Sprintf("you can find the current playlist here: %v", c.playlistLink), nick)
+}
+
+func (c *controller) likeSong(nick string) {
+	playing, _, err := c.dj.CurrentlyPlaying()
+	if err != nil {
+		c.sendMsg("There is nothing currently playing.", nick)
+		return
+	}
+	result := c.likes.search(nick)
+	if result > 0 {
+		c.sendMsg("You already liked this song.", nick)
+		return
+	}
+	c.likes.add(nick)
+	c.sendMsg(fmt.Sprintf("I will tell %v you liked \"%v\"", playing.Owner, playing.Media.Title), nick)
+}
+
+func (c *controller) addUserToUpdates(nick string) {
+	index := c.updateSubscribers.search(nick)
+	if index < 0 {
+		c.sendMsg("You will now get a message every time a new song plays. send `-updateme` again to turn it off.", nick)
+		c.updateSubscribers.add(nick)
+	} else {
+		c.sendMsg("You will no longer get notifications.", nick)
+		c.updateSubscribers.remove(nick)
+	}
+	saveStruct(&c.updateSubscribers, "updateUsers.json")
+}
+
+func (c *controller) removeItem(message string, nick string) {
+	intString := strings.TrimSpace(strings.Replace(message, "-remove", "", -1))
+	index, err := strconv.Atoi(intString)
+	if err != nil {
+		c.sendMsg("please enter a valid integer", nick)
+		return
+	}
+
+	entry, err := c.dj.EntryAtIndex(index)
+	if err != nil {
+		c.sendMsg("Index out of range", nick)
+		return
+	}
+
+	if nick != entry.Owner || !c.isMod(nick) {
+		c.sendMsg(fmt.Sprintf("I can't allow you to do that, %v", nick), nick)
+		return
+	}
+
+	err = c.dj.RemoveIndex(index)
+	if err != nil {
+		c.sendMsg("index out of range", nick)
+		return
+	}
+	queue := localQueue{Q: c.dj.Queue()}
+	saveStruct(queue, "queue.json")
+	c.playlistDirty = true
+	c.sendMsg("Successfully removed item at index", nick)
+
+	return
+}
+
+func (c *controller) addDedication(message string, nick string) {
+	positions := c.dj.UserPosition(nick)
+	if len(positions) <= 0 {
+		c.sendMsg("you have no songs in the queue", nick)
+		return
+	}
+
+	dedication := strings.TrimSpace(strings.Replace(message, "-dedicate", "", -1))
+
+	entry, err := c.dj.EntryAtIndex(positions[0])
+	if err != nil {
+		c.sendMsg("there was an error", nick)
+		return
+	}
+	entry.Dedication = dedication
+	err = c.dj.ChangeIndex(entry, positions[0])
+	if err != nil {
+		c.sendMsg("there was an error", nick)
+		return
+	}
+
+	c.sendMsg(fmt.Sprintf("Dedicated %v to %v", entry.Media.Title, dedication), nick)
+}
+
+func (c *controller) isMod(nick string) bool {
+	for _, mod := range c.cfg.Moderators {
+		if nick == mod {
+			return true
 		}
 	}
-	return dur, errors.New("user is not in queue")
+	return false
 }
 
-func replaceAtIndex(in string, r rune, i int) string {
-	out := ""
-	j := 0
-	for _, c := range in {
-		if j != i {
-			out += string(c)
-		} else {
-			out += string(r)
+func (c *controller) uploadString(text string) (url string, err error) {
+	var file *os.File
+
+	type resp struct {
+		response *haste.Response
+		er       error
+	}
+
+	c1 := make(chan resp)
+	go func() {
+		hasteResp, err := c.haste.UploadString(text)
+		c1 <- resp{response: hasteResp, er: err}
+	}()
+
+	select {
+	case res := <-c1:
+		err = res.er
+		url = "https://hastebin.com/raw/" + res.response.Key
+	case <-time.After(1 * time.Second):
+		// TODO: find a better way to do this
+		err = ioutil.WriteFile("tmp.txt", []byte(text), 0644)
+		if err != nil {
+			return url, err
 		}
-		j++
-	}
-	return out
-}
-
-func fmtDuration(d time.Duration) string {
-	d = d.Round(time.Second)
-	minutes := d / time.Minute
-	d -= minutes * time.Minute
-	seconds := d / time.Second
-	return fmt.Sprintf("%02d:%02d", minutes, seconds)
-}
-
-func durationBar(width int, fraction time.Duration, total time.Duration) string {
-	base := strings.Repeat("—", width)
-	pos := float64(fraction.Seconds() / total.Seconds())
-
-	newpos := int(float64(utf8.RuneCountInString(base))*pos) - 1
-	if newpos < 0 {
-		newpos = 0
-	} else if newpos >= utf8.RuneCountInString(base) {
-		newpos = utf8.RuneCountInString(base) - 1
+		file, err = os.Open("tmp.txt")
+		if err != nil {
+			return url, err
+		}
+		url, err = fileupload.UploadToHost("https://uguu.se/api.php?d=upload-tool", file)
 	}
 
-	return replaceAtIndex(base, '⚫', newpos)
+	return url, err
+}
+
+func (c *controller) sendMsg(message string, nick string) {
+	if _, inChat := c.sgg.GetUser(nick); inChat {
+		c.msgBuffer <- outgoingMessage{nick: nick, message: message}
+	}
+}
+
+func (c *controller) messageSender() {
+	for {
+		// TODO: verify the message was sent
+		msg := <-c.msgBuffer
+		c.sgg.SendPrivateMessage(msg.nick, msg.message)
+		log.Printf("[MSG] message sent to %v: %v", msg.nick, msg.message)
+		time.Sleep(time.Millisecond * 450)
+	}
+}
+
+func (c *controller) newSong(entry opendj.QueueEntry) {
+	c.playlistDirty = true
+	msg := fmt.Sprintf("Now Playing %s's request: %s", entry.Owner, entry.Media.Title)
+	log.Println("[INFO] ▶ " + msg)
+
+	c.updateSubscribers.Lock()
+	for _, user := range c.updateSubscribers.Users {
+		c.sendMsg(msg, user)
+	}
+	c.updateSubscribers.Unlock()
+
+	if entry.Dedication != "" {
+		c.sendMsg(fmt.Sprintf("%s dedicated this song to you.", entry.Owner), entry.Dedication)
+	}
+
+	c.sendMsg("Playing your song now", entry.Owner)
+}
+
+func (c *controller) songOver(entry opendj.QueueEntry, err error) {
+	c.playlistDirty = true
+	log.Println("[INFO] 🛑 Done Playing")
+	queue := localQueue{Q: c.dj.Queue()}
+	saveStruct(queue, "queue.json")
+
+	likes := len(c.likes.Users)
+	if likes > 0 {
+		ppl := "people"
+		if likes == 1 {
+			ppl = "person"
+		}
+		c.sendMsg(fmt.Sprintf("%v %v really liked your song PeepoHappy", likes, ppl), entry.Owner)
+	}
+	c.likes.clear()
+}
+
+func (c *controller) songError(err error) {
+	log.Printf("[ERROR] there was an error during song playback: %v", err)
 }
 
 func saveStruct(v interface{}, title string) error {
@@ -681,51 +536,4 @@ func saveStruct(v interface{}, title string) error {
 		return err
 	}
 	return nil
-}
-
-func (b *bot) queuePositionMessage(nick string) string {
-	s1 := fmt.Sprintf("There are currently %v songs in the queue", len(b.waitingQueue.Items))
-	usepos := b.getUserPosition(nick)
-	if usepos >= 0 {
-		s1 += fmt.Sprintf(", you are at position %v", usepos+1)
-		d, err := b.durationUntilUser(nick)
-		if err == nil {
-			s1 += fmt.Sprintf(" and your song will play in %v", fmtDuration(d))
-		}
-	}
-	return s1
-}
-
-func (b *bot) addDedication(owner string, target string) error {
-	b.waitingQueue.Lock()
-	defer b.waitingQueue.Unlock()
-	position := b.getUserPosition(owner)
-	if position < 0 {
-		return errors.New("user not in queue")
-	}
-	b.waitingQueue.Items[position].Dedication = target
-	return nil
-}
-
-func (b *bot) formatPlaylist() string {
-	lines := fmt.Sprintf(" curretly playing: 🎶 %q 🎶 requested by %s\n\n", b.currentEntry.Video.Title, b.currentEntry.User)
-	var maxname int
-	for _, vid := range b.waitingQueue.Items {
-		if len(vid.User) > maxname {
-			maxname = len(vid.User)
-		}
-	}
-	for i, vid := range b.waitingQueue.Items {
-		lines += fmt.Sprintf(" %2v | %-*v | %v | %v\n", i+1, maxname, vid.User, fmtDuration(vid.Video.Duration), vid.Video.Title)
-	}
-	return lines
-}
-
-func (b *bot) checkMod(nick string) bool {
-	for _, mod := range b.con.Moderators {
-		if nick == mod {
-			return true
-		}
-	}
-	return false
 }
