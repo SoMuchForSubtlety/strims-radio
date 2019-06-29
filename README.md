@@ -3,6 +3,7 @@
 strims-radio is a plug.dj clone that uses [opendj](https://github.com/SoMuchForSubtlety/opendj) and the youtube API to stream songs requested by chat to a RTMP server.
 ## setup
     git clone https://github.com/SoMuchForSubtlety/strims-radio
+    cd strims-radio
     cp sample-config.json config.json
     vim config.json
     go run .
