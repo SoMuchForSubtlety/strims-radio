@@ -32,3 +32,5 @@ Commands only work in private messages. These commands are currently available:
         removes the song at the provided index from the queue if the user submitted it or the user is a mod
     {youtube url}
         adds the song at the provided url to the queue if it's not too long
+    -addbackup {youtube url}
+        adds the provided song to the backup playlist (mod only)
