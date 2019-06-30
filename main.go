@@ -49,7 +49,8 @@ type controller struct {
 	likes             userList
 	updateSubscribers userList
 
-	backupSongs []opendj.QueueEntry
+	backupSongs       []opendj.QueueEntry
+	recentBackupSongs []int
 }
 
 type outgoingMessage struct {
@@ -84,7 +85,7 @@ func main() {
 	// Cleanly close the connection
 	defer cont.sgg.Close()
 
-	if len(cont.backupSongs) > 0 || len(cont.dj.Queue()) <= 0 {
+	if len(cont.backupSongs) > 0 && len(cont.dj.Queue()) <= 0 {
 		cont.dj.AddEntry(cont.backupSongs[rand.Intn(len(cont.backupSongs))])
 	}
 
@@ -100,6 +101,7 @@ func main() {
 func initController() (c *controller, err error) {
 	c = &controller{}
 	c.playlistDirty = true
+	c.recentBackupSongs = make([]int, 5)
 
 	c.cfg, err = readConfig(*configLocation)
 	if err != nil {
@@ -236,6 +238,7 @@ func (c *controller) onPrivMessage(m dggchat.PrivateMessage, s *dggchat.Session)
 		return
 	} else if ytURL.Match([]byte(trimmedMsg)) {
 		c.addYTlink(m)
+		return
 	}
 
 	c.sendMsg("unknown command", m.User.Nick)
@@ -260,8 +263,8 @@ func (c *controller) addYTlink(m dggchat.PrivateMessage) {
 		userTotalDuration += queue[j].Media.Duration
 	}
 
-	if userTotalDuration >= 20 {
-		c.sendMsg("Please wait a while before you add more songs.", m.User.Nick)
+	if userTotalDuration.Minutes() > 30 {
+		c.sendMsg("You already have over 30 minutes queued, please wait a while before you add more.", m.User.Nick)
 		return
 	}
 
@@ -416,7 +419,7 @@ func (c *controller) removeItem(message string, nick string) {
 		return
 	}
 
-	if nick != entry.Owner || !c.isMod(nick) {
+	if nick != entry.Owner && !c.isMod(nick) {
 		c.sendMsg(fmt.Sprintf("I can't allow you to do that, %v", nick), nick)
 		return
 	}
@@ -548,6 +551,7 @@ func (c *controller) songOver(entry opendj.QueueEntry, err error) {
 
 	likes := len(c.likes.Users)
 	if likes > 0 {
+		entry.Dedication = ""
 		entry.Owner = "afk bot"
 		c.backupSongs = append(c.backupSongs, entry)
 		saveStruct(c.backupSongs, backupSongsLocation)
@@ -618,9 +622,20 @@ func (c *controller) addSongToBackup(url string, nick string) error {
 }
 
 func ytIDfromURL(urlstring string) (id string, err error) {
-	id = regexp.MustCompile(`(\?v=|be\/)[a-zA-Z0-9-_]+`).FindString(urlstring)[3:]
-	if id == "afk bot" {
+	id = regexp.MustCompile(`(\?v=|be\/)[a-zA-Z0-9-_]+`).FindString(urlstring)
+	if len(id) < 3 {
 		err = errors.New("no valid ID found")
 	}
+	id = id[3:]
 	return id, err
+}
+
+func (c *controller) addToBackup(entry opendj.QueueEntry) error {
+	for _, song := range c.backupSongs {
+		if song.Media.URL == entry.Media.URL {
+			return errors.New("entry already in backup list")
+		}
+	}
+	c.backupSongs = append(c.backupSongs, entry)
+	return nil
 }
