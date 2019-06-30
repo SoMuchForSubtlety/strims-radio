@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -31,10 +32,6 @@ type config struct {
 	Rtmp       string   `json:"rtmp"`
 	APIKey     string   `json:"api_key"`
 	Moderators []string `json:"moderators"`
-}
-
-type localQueue struct {
-	Q []opendj.QueueEntry
 }
 
 type controller struct {
@@ -87,6 +84,10 @@ func main() {
 	// Cleanly close the connection
 	defer cont.sgg.Close()
 
+	if len(cont.backupSongs) > 0 || len(cont.dj.Queue()) <= 0 {
+		cont.dj.AddEntry(cont.backupSongs[rand.Intn(len(cont.backupSongs))])
+	}
+
 	go cont.dj.Play(cont.cfg.Rtmp)
 
 	cont.messageSender()
@@ -114,9 +115,8 @@ func initController() (c *controller, err error) {
 		return nil, err
 	}
 
+	var queue []opendj.QueueEntry
 	// load the saved playlist if there is one
-	var queue localQueue
-
 	file, err := ioutil.ReadFile(queueSaveLocation)
 	if err != nil {
 		log.Printf("[INFO] no previous playlist found: %v", err)
@@ -125,7 +125,7 @@ func initController() (c *controller, err error) {
 		if err != nil {
 			log.Printf("[ERROR] failed to unmarshal queue: %v", err)
 		} else {
-			log.Printf("[INFO] loaded playlist with %v songs", len(queue.Q))
+			log.Printf("[INFO] loaded playlist with %v songs", len(queue))
 		}
 	}
 
@@ -156,7 +156,7 @@ func initController() (c *controller, err error) {
 	}
 
 	// create dj
-	c.dj = opendj.NewDj(queue.Q)
+	c.dj = opendj.NewDj(queue)
 
 	c.dj.AddNewSongHandler(c.newSong)
 	c.dj.AddEndOfSongHandler(c.songOver)
@@ -203,9 +203,6 @@ func (c *controller) onPrivMessage(m dggchat.PrivateMessage, s *dggchat.Session)
 
 	ytURL := regexp.MustCompile(`(youtube.com\/watch\?v=|youtu.be\/)[a-zA-Z0-9_-]+`)
 
-	if ytURL.Match([]byte(trimmedMsg)) {
-		c.addYTlink(m)
-	}
 	switch trimmedMsg {
 	case "-playing":
 		c.sendCurrentSong(m.User.Nick)
@@ -224,6 +221,7 @@ func (c *controller) onPrivMessage(m dggchat.PrivateMessage, s *dggchat.Session)
 		return
 	case "-like":
 		c.likeSong(m.User.Nick)
+		return
 	default:
 	}
 
@@ -232,7 +230,15 @@ func (c *controller) onPrivMessage(m dggchat.PrivateMessage, s *dggchat.Session)
 		return
 	} else if strings.Contains(trimmedMsg, "-dedicate") {
 		c.addDedication(m.Message, m.User.Nick)
+		return
+	} else if strings.Contains(trimmedMsg, "-addbackup") {
+		c.addSongToBackup(trimmedMsg, m.User.Nick)
+		return
+	} else if ytURL.Match([]byte(trimmedMsg)) {
+		c.addYTlink(m)
 	}
+
+	c.sendMsg("unknown command", m.User.Nick)
 }
 
 func onError(e string, s *dggchat.Session) {
@@ -274,38 +280,24 @@ func (c *controller) addYTlink(m dggchat.PrivateMessage) {
 		maxduration = 5
 	}
 
-	id := regexp.MustCompile(`(\?v=|be\/)[a-zA-Z0-9-_]+`).FindString(m.Message)[3:]
-	if id == "" {
+	id, err := ytIDfromURL(m.Message)
+	if err != nil {
 		c.sendMsg("invalid link", m.User.Nick)
 		return
 	}
 
-	res, err := c.ytServ.Videos.List("id,snippet,contentDetails").Id(id).Do()
-	songDuration, _ := time.ParseDuration(strings.ToLower(res.Items[0].ContentDetails.Duration[2:]))
+	entry, err := c.createYTQueueEntry(id, m.User.Nick)
 	if err != nil {
-		log.Printf("[ERROR] youtube API query failed: %v", err)
-		c.sendMsg("there was an error", m.User.Nick)
+		log.Printf("[ERROR] couldn't get song: %v", err)
+		c.sendMsg("not found", m.User.Nick)
 		return
-	} else if len(res.Items) < 1 {
-		c.sendMsg("invalid link", m.User.Nick)
-		return
-	} else if songDuration.Minutes() >= maxduration {
+	} else if entry.Media.Duration.Minutes() >= maxduration {
 		c.sendMsg(fmt.Sprintf("This song is too long, please keep it under %v minutes", maxduration), m.User.Nick)
 		return
 	}
 
-	var video opendj.Media
-	video.Title = res.Items[0].Snippet.Title
-	video.Duration = songDuration
-	video.URL = ytURLStart + res.Items[0].Id
-
-	var entry opendj.QueueEntry
-	entry.Media = video
-	entry.Owner = m.User.Nick
-
 	c.dj.AddEntry(entry)
-	q := localQueue{Q: c.dj.Queue()}
-	saveStruct(q, queueSaveLocation)
+	saveStruct(c.dj.Queue(), queueSaveLocation)
 	c.playlistDirty = true
 
 	durations := c.dj.DurationUntilUser(m.User.Nick)
@@ -434,8 +426,7 @@ func (c *controller) removeItem(message string, nick string) {
 		c.sendMsg("index out of range", nick)
 		return
 	}
-	queue := localQueue{Q: c.dj.Queue()}
-	saveStruct(queue, queueSaveLocation)
+	saveStruct(c.dj.Queue(), queueSaveLocation)
 	c.playlistDirty = true
 	c.sendMsg("Successfully removed item at index", nick)
 
@@ -546,16 +537,18 @@ func (c *controller) newSong(entry opendj.QueueEntry) {
 func (c *controller) songOver(entry opendj.QueueEntry, err error) {
 	c.playlistDirty = true
 	log.Println("[INFO] 🛑 Done Playing")
-	queue := localQueue{Q: c.dj.Queue()}
+
+	queue := c.dj.Queue()
 	saveStruct(queue, queueSaveLocation)
 
-	if len(queue.Q) <= 0 && len(c.backupSongs) > 0 {
+	if len(queue) <= 0 && len(c.backupSongs) > 0 {
 		rand.Seed(time.Now().Unix())
-		c.dj.AddEntry(queue.Q[rand.Intn(len(queue.Q))])
+		c.dj.AddEntry(c.backupSongs[rand.Intn(len(c.backupSongs))])
 	}
 
 	likes := len(c.likes.Users)
 	if likes > 0 {
+		entry.Owner = "afk bot"
 		c.backupSongs = append(c.backupSongs, entry)
 		saveStruct(c.backupSongs, backupSongsLocation)
 		ppl := "people"
@@ -581,4 +574,53 @@ func saveStruct(v interface{}, title string) error {
 		return err
 	}
 	return nil
+}
+
+func (c *controller) createYTQueueEntry(id string, owner string) (entry opendj.QueueEntry, err error) {
+	res, err := c.ytServ.Videos.List("id,snippet,contentDetails").Id(id).Do()
+	if err != nil {
+		return entry, err
+	}
+	if len(res.Items) <= 0 {
+		return entry, errors.New("nothing found")
+	}
+	songDuration, _ := time.ParseDuration(strings.ToLower(res.Items[0].ContentDetails.Duration[2:]))
+	var video opendj.Media
+	video.Title = res.Items[0].Snippet.Title
+	video.Duration = songDuration
+	video.URL = ytURLStart + res.Items[0].Id
+
+	entry.Media = video
+	entry.Owner = owner
+	return entry, nil
+}
+
+func (c *controller) addSongToBackup(url string, nick string) error {
+	if !c.isMod(nick) {
+		c.sendMsg("you can't do that PepoBan", nick)
+		return nil
+	}
+	id, err := ytIDfromURL(url)
+	if err != nil {
+		return err
+	}
+	entry, err := c.createYTQueueEntry(id, "")
+	if err != nil {
+		return err
+	}
+	c.backupSongs = append(c.backupSongs, entry)
+	err = saveStruct(c.backupSongs, backupSongsLocation)
+	if err != nil {
+		return err
+	}
+	c.sendMsg(fmt.Sprintf("added \"%v\" to the backup playlist", entry.Media.Title), nick)
+	return nil
+}
+
+func ytIDfromURL(urlstring string) (id string, err error) {
+	id = regexp.MustCompile(`(\?v=|be\/)[a-zA-Z0-9-_]+`).FindString(urlstring)[3:]
+	if id == "afk bot" {
+		err = errors.New("no valid ID found")
+	}
+	return id, err
 }
