@@ -1,0 +1,7 @@
+version: "3.2"
+
+services:
+  radio:
+    container_name: radio
+    build: .
+    restart: always
