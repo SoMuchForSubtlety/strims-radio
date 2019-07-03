@@ -228,7 +228,7 @@ func (c *controller) onPrivMessage(m dggchat.PrivateMessage, s *dggchat.Session)
 	}
 
 	if strings.Contains(trimmedMsg, "-remove") {
-		c.removeItem(trimmedMsg, m.User.Nick)
+		c.removeItem(trimmedMsg, m.User)
 		return
 	} else if strings.Contains(trimmedMsg, "-dedicate") {
 		c.addDedication(m.Message, m.User.Nick)
@@ -404,34 +404,34 @@ func (c *controller) addUserToUpdates(nick string) {
 	saveStruct(&c.updateSubscribers, subscriberSaveLocation)
 }
 
-func (c *controller) removeItem(message string, nick string) {
+func (c *controller) removeItem(message string, nick dggchat.User) {
 	intString := strings.TrimSpace(strings.Replace(message, "-remove", "", -1))
 	index, err := strconv.Atoi(intString)
 	index--
 	if err != nil {
-		c.sendMsg("please enter a valid integer", nick)
+		c.sendMsg("please enter a valid integer", nick.Nick)
 		return
 	}
 
 	entry, err := c.dj.EntryAtIndex(index)
 	if err != nil {
-		c.sendMsg("Index out of range", nick)
+		c.sendMsg("Index out of range", nick.Nick)
 		return
 	}
 
-	if nick != entry.Owner && !c.isMod(nick) {
-		c.sendMsg(fmt.Sprintf("I can't allow you to do that, %v", nick), nick)
+	if nick.Nick != entry.Owner && !c.isMod(nick.Nick) && !nick.HasFeature("moderator") {
+		c.sendMsg(fmt.Sprintf("I can't allow you to do that, %v", nick), nick.Nick)
 		return
 	}
 
 	err = c.dj.RemoveIndex(index)
 	if err != nil {
-		c.sendMsg("index out of range", nick)
+		c.sendMsg("index out of range", nick.Nick)
 		return
 	}
 	saveStruct(c.dj.Queue(), queueSaveLocation)
 	c.playlistDirty = true
-	c.sendMsg("Successfully removed item at index", nick)
+	c.sendMsg("Successfully removed item at index", nick.Nick)
 
 	return
 }
