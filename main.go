@@ -325,7 +325,7 @@ func (c *controller) sendCurrentSong(nick string) {
 		c.sendMsg("there is nothing playing right now :(", nick)
 		return
 	}
-	response := fmt.Sprintf("`%v` `%v/%v` currently playing: 🎶 %q 🎶 requested by %s", durationBar(15, elapsed, video.Duration), fmtDuration(elapsed), fmtDuration(video.Duration), video.Title, song.Owner)
+	response := fmt.Sprintf("`%v` `%v/%v` currently playing: 🎶 \"%s\" 🎶 requested by %s", durationBar(15, elapsed, video.Duration), fmtDuration(elapsed), fmtDuration(video.Duration), video.Title, song.Owner)
 	c.sendMsg(response, nick)
 }
 
@@ -349,7 +349,7 @@ func (c *controller) sendQueuePositions(nick string) {
 			c.sendMsg("there was an error", nick)
 			return
 		}
-		response += fmt.Sprintf(", your next song is in position %v and will play in %v", positions[0]+1, fmtDuration(0))
+		response += fmt.Sprintf(", your next song is in position %v and will play in %v", positions[0]+1, fmtDuration(durations[0]))
 	}
 	c.sendMsg(response, nick)
 }
