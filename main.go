@@ -58,16 +58,18 @@ type outgoingMessage struct {
 	message string
 }
 
-var configLocation = flag.String("config", "config.json", "the location of the config file")
+var (
+	configLocation         = flag.String("config", "config.json", "the location of the config file")
+	queueSaveLocation      = flag.String("queue", "queue.json", "the location of the saved queue")
+	backupSongsLocation    = flag.String("songs", "songs.json", "the location of the backup songs")
+	subscriberSaveLocation = flag.String("users", "updateUsers.json", "the location of the list of users that want to get notifications")
+)
 
 const (
-	queueSaveLocation      = "queue.json"
-	backupSongsLocation    = "songs.json"
-	subscriberSaveLocation = "updateUsers.json"
-	hasteURL               = "https://hastebin.com"
-	ytURLStart             = "https://www.youtube.com/watch?v="
-	uguuURL                = "https://uguu.se/api.php?d=upload-tool"
-	tmpFile                = "tmp.txt"
+	hasteURL   = "https://hastebin.com"
+	ytURLStart = "https://www.youtube.com/watch?v="
+	uguuURL    = "https://uguu.se/api.php?d=upload-tool"
+	tmpFile    = "tmp.txt"
 )
 
 func main() {
@@ -119,7 +121,7 @@ func initController() (c *controller, err error) {
 
 	var queue []opendj.QueueEntry
 	// load the saved playlist if there is one
-	file, err := ioutil.ReadFile(queueSaveLocation)
+	file, err := ioutil.ReadFile(*queueSaveLocation)
 	if err != nil {
 		log.Printf("[INFO] no previous playlist found: %v", err)
 	} else {
@@ -132,7 +134,7 @@ func initController() (c *controller, err error) {
 	}
 
 	// load update subscribers
-	file, err = ioutil.ReadFile(subscriberSaveLocation)
+	file, err = ioutil.ReadFile(*subscriberSaveLocation)
 	if err != nil {
 		log.Printf("[INFO] no user list found: %v", err)
 	} else {
@@ -145,7 +147,7 @@ func initController() (c *controller, err error) {
 	}
 
 	// load backup songs
-	file, err = ioutil.ReadFile(backupSongsLocation)
+	file, err = ioutil.ReadFile(*backupSongsLocation)
 	if err != nil {
 		log.Printf("[INFO] no backup song list found: %v", err)
 	} else {
@@ -300,7 +302,7 @@ func (c *controller) addYTlink(m dggchat.PrivateMessage) {
 	}
 
 	c.dj.AddEntry(entry)
-	saveStruct(c.dj.Queue(), queueSaveLocation)
+	saveStruct(c.dj.Queue(), *queueSaveLocation)
 	c.playlistDirty = true
 
 	durations := c.dj.DurationUntilUser(m.User.Nick)
@@ -401,7 +403,7 @@ func (c *controller) addUserToUpdates(nick string) {
 		c.sendMsg("You will no longer get notifications.", nick)
 		c.updateSubscribers.remove(nick)
 	}
-	saveStruct(&c.updateSubscribers, subscriberSaveLocation)
+	saveStruct(&c.updateSubscribers, *subscriberSaveLocation)
 }
 
 func (c *controller) removeItem(message string, nick dggchat.User) {
@@ -429,7 +431,7 @@ func (c *controller) removeItem(message string, nick dggchat.User) {
 		c.sendMsg("index out of range", nick.Nick)
 		return
 	}
-	saveStruct(c.dj.Queue(), queueSaveLocation)
+	saveStruct(c.dj.Queue(), *queueSaveLocation)
 	c.playlistDirty = true
 	c.sendMsg("Successfully removed item at index", nick.Nick)
 
@@ -542,7 +544,7 @@ func (c *controller) songOver(entry opendj.QueueEntry, err error) {
 	log.Println("[INFO] 🛑 Done Playing")
 
 	queue := c.dj.Queue()
-	saveStruct(queue, queueSaveLocation)
+	saveStruct(queue, *queueSaveLocation)
 
 	if len(queue) <= 0 && len(c.backupSongs) > 0 {
 		rand.Seed(time.Now().Unix())
@@ -554,7 +556,7 @@ func (c *controller) songOver(entry opendj.QueueEntry, err error) {
 		entry.Dedication = ""
 		entry.Owner = "afk bot"
 		c.backupSongs = append(c.backupSongs, entry)
-		saveStruct(c.backupSongs, backupSongsLocation)
+		saveStruct(c.backupSongs, *backupSongsLocation)
 		ppl := "people"
 		if likes == 1 {
 			ppl = "person"
@@ -613,7 +615,7 @@ func (c *controller) addSongToBackup(url string, nick string) error {
 		return err
 	}
 	c.backupSongs = append(c.backupSongs, entry)
-	err = saveStruct(c.backupSongs, backupSongsLocation)
+	err = saveStruct(c.backupSongs, *backupSongsLocation)
 	if err != nil {
 		return err
 	}
