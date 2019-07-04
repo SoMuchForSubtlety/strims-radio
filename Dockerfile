@@ -12,4 +12,4 @@ RUN apt update && apt install -y ffmpeg wget
 RUN wget https://yt-dl.org/downloads/latest/youtube-dl -O /usr/local/bin/youtube-dl
 RUN chmod a+rx /usr/local/bin/youtube-dl
 COPY --from=builder /radio /usr/bin/radio
-ENTRYPOINT ["/usr/bin/radio"]
+ENTRYPOINT ["/usr/bin/radio", "-config", "/storage/config.json", "-songs", "/storage/songs.json", "-queue", "/storage/queue.json", "-users", "/storage/updateUsers.json"]

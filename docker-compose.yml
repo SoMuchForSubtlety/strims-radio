@@ -5,3 +5,5 @@ services:
     container_name: radio
     build: .
     restart: always
+    volumes:
+      - ./storage/:/storage/
