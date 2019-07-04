@@ -9,8 +9,16 @@ strims-radio is a plug.dj clone that uses [opendj](https://github.com/SoMuchForS
     vim config.json
     go run .
 ## flags
-      -config string
+```
+  -config string
         the location of the config file (default "config.json")
+  -queue string
+        the location of the saved queue (default "queue.json")
+  -songs string
+        the location of the backup songs (default "songs.json")
+  -users string
+        the location of the list of users that want to get notifications (default "updateUsers.json")
+```
 ## commands
 Commands only work in private messages. These commands are currently available:
     
