@@ -8,6 +8,12 @@ strims-radio is a plug.dj clone that uses [opendj](https://github.com/SoMuchForS
     cp sample-config.json config.json
     vim config.json
     go run .
+    
+## running in docker
+    mkdir storage
+    cp config.json storage
+    sudo docker-compose up -d
+    
 ## flags
 ```
   -config string
