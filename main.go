@@ -202,7 +202,7 @@ func readConfig(title string) (cfg config, err error) {
 }
 
 func (c *controller) onPrivMessage(m dggchat.PrivateMessage, s *dggchat.Session) {
-	log.Printf("New message from %s: %s\n", m.User, m.Message)
+	log.Printf("[INFO] New message from %s: %s\n", m.User.Nick, m.Message)
 
 	trimmedMsg := strings.TrimSpace(m.Message)
 
@@ -219,7 +219,10 @@ func (c *controller) onPrivMessage(m dggchat.PrivateMessage, s *dggchat.Session)
 		c.sendQueuePositions(m.User.Nick)
 		return
 	case "-playlist":
-		c.sendPlaylist(m.User.Nick)
+		c.sendPlaylist(m.User.Nick, c.dj.Queue())
+		return
+	case "-backup":
+		c.sendPlaylist(m.User.Nick, c.backupSongs)
 		return
 	case "-updateme":
 		c.addUserToUpdates(m.User.Nick)
@@ -357,22 +360,19 @@ func (c *controller) sendQueuePositions(nick string) {
 	c.sendMsg(response, nick)
 }
 
-func (c *controller) sendPlaylist(nick string) {
-	if c.playlistDirty {
-		currentSong, _, _ := c.dj.CurrentlyPlaying()
-		playlist := formatPlaylist(c.dj.Queue(), currentSong)
+func (c *controller) sendPlaylist(nick string, playlist []opendj.QueueEntry) {
+	currentSong, _, _ := c.dj.CurrentlyPlaying()
+	playlistString := formatPlaylist(c.backupSongs, currentSong)
 
-		url, err := c.uploadString(playlist)
-		if err != nil {
-			log.Printf("[ERROR] failed to upload playlist: %v", err)
-			c.sendMsg("there was an error", nick)
-			return
-		}
-
-		log.Println("[INFO] 📝 Generated playlist")
-		c.playlistLink = url
-		c.playlistDirty = false
+	url, err := c.uploadString(playlistString)
+	if err != nil {
+		log.Printf("[ERROR] failed to upload playlist: %v", err)
+		c.sendMsg("there was an error", nick)
+		return
 	}
+
+	log.Println("[INFO] 📝 Generated playlist")
+	c.playlistLink = url
 
 	c.sendMsg(fmt.Sprintf("you can find the current playlist here: %v", c.playlistLink), nick)
 }
@@ -625,10 +625,12 @@ func (c *controller) manuallyAddSongToBackup(url string, nick string) error {
 	}
 	id, err := ytIDfromURL(url)
 	if err != nil {
+		c.sendMsg("could not get video ID from the provided URL", nick)
 		return err
 	}
 	err = c.saveSongToBackup(id)
 	if err != nil {
+		c.sendMsg("The provided song is already in the backup playlist", nick)
 		return err
 	}
 
