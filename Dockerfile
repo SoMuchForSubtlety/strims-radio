@@ -8,7 +8,7 @@ RUN go build -o /radio .
 
 FROM ubuntu:latest 
 WORKDIR /
-RUN apt update && apt install -y ffmpeg wget
+RUN apt update && apt install -y ffmpeg wget python
 RUN wget https://yt-dl.org/downloads/latest/youtube-dl -O /usr/local/bin/youtube-dl
 RUN chmod a+rx /usr/local/bin/youtube-dl
 COPY --from=builder /radio /usr/bin/radio
