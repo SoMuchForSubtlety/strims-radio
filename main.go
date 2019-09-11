@@ -362,7 +362,7 @@ func (c *controller) sendQueuePositions(nick string) {
 
 func (c *controller) sendPlaylist(nick string, playlist []opendj.QueueEntry) {
 	currentSong, _, _ := c.dj.CurrentlyPlaying()
-	playlistString := formatPlaylist(c.backupSongs, currentSong)
+	playlistString := formatPlaylist(playlist, currentSong)
 
 	url, err := c.uploadString(playlistString)
 	if err != nil {
