@@ -74,6 +74,7 @@ const (
 
 func main() {
 	flag.Parse()
+	rand.Seed(time.Now().Unix())
 	cont, err := initController()
 	if err != nil {
 		log.Fatalf("[ERROR] could not initialize controller: %v", err)
@@ -233,10 +234,10 @@ func (c *controller) onPrivMessage(m dggchat.PrivateMessage, s *dggchat.Session)
 		c.removeItem(trimmedMsg, m.User)
 		return
 	} else if strings.Contains(trimmedMsg, "-dedicate") {
-		c.addDedication(m.Message, m.User.Nick)
+		c.addDedication(trimmedMsg, m.User.Nick)
 		return
 	} else if strings.Contains(trimmedMsg, "-addbackup") {
-		c.addSongToBackup(trimmedMsg, m.User.Nick)
+		c.manuallyAddSongToBackup(trimmedMsg, m.User.Nick)
 		return
 	} else if ytURL.Match([]byte(trimmedMsg)) {
 		c.addYTlink(m)
@@ -407,7 +408,7 @@ func (c *controller) addUserToUpdates(nick string) {
 }
 
 func (c *controller) removeItem(message string, nick dggchat.User) {
-	intString := strings.TrimSpace(strings.Replace(message, "-remove", "", -1))
+	intString := strings.Fields(message)[1]
 	index, err := strconv.Atoi(intString)
 	index--
 	if err != nil {
@@ -445,7 +446,7 @@ func (c *controller) addDedication(message string, nick string) {
 		return
 	}
 
-	dedication := strings.TrimSpace(strings.Replace(message, "-dedicate", "", -1))
+	dedication := strings.Replace(message, "-dedicate", "", -1)
 
 	entry, err := c.dj.EntryAtIndex(positions[0])
 	if err != nil {
@@ -547,16 +548,14 @@ func (c *controller) songOver(entry opendj.QueueEntry, err error) {
 	saveStruct(queue, *queueSaveLocation)
 
 	if len(queue) <= 0 && len(c.backupSongs) > 0 {
-		rand.Seed(time.Now().Unix())
 		c.dj.AddEntry(c.backupSongs[rand.Intn(len(c.backupSongs))])
 	}
 
 	likes := len(c.likes.Users)
+	id, _ := ytIDfromURL(entry.Media.URL)
+
+	c.saveSongToBackup(id)
 	if likes > 0 {
-		entry.Dedication = ""
-		entry.Owner = "afk bot"
-		c.backupSongs = append(c.backupSongs, entry)
-		saveStruct(c.backupSongs, *backupSongsLocation)
 		ppl := "people"
 		if likes == 1 {
 			ppl = "person"
@@ -564,6 +563,24 @@ func (c *controller) songOver(entry opendj.QueueEntry, err error) {
 		c.sendMsg(fmt.Sprintf("%v %v really liked your song PeepoHappy", likes, ppl), entry.Owner)
 	}
 	c.likes.clear()
+}
+
+func (c *controller) saveSongToBackup(id string) error {
+	// TODO: replace with map
+	for _, entry := range c.backupSongs {
+		if existingID, _ := ytIDfromURL(entry.Media.URL); existingID == id {
+			return errors.New("entry already in backup list")
+		}
+	}
+
+	entry, err := c.createYTQueueEntry(id, "afk bot")
+	if err != nil {
+		return err
+	}
+
+	c.backupSongs = append(c.backupSongs, entry)
+	saveStruct(c.backupSongs, *backupSongsLocation)
+	return nil
 }
 
 func (c *controller) songError(err error) {
@@ -601,7 +618,7 @@ func (c *controller) createYTQueueEntry(id string, owner string) (entry opendj.Q
 	return entry, nil
 }
 
-func (c *controller) addSongToBackup(url string, nick string) error {
+func (c *controller) manuallyAddSongToBackup(url string, nick string) error {
 	if !c.isMod(nick) {
 		c.sendMsg("you can't do that PepoBan", nick)
 		return nil
@@ -610,16 +627,12 @@ func (c *controller) addSongToBackup(url string, nick string) error {
 	if err != nil {
 		return err
 	}
-	entry, err := c.createYTQueueEntry(id, "")
+	err = c.saveSongToBackup(id)
 	if err != nil {
 		return err
 	}
-	c.backupSongs = append(c.backupSongs, entry)
-	err = saveStruct(c.backupSongs, *backupSongsLocation)
-	if err != nil {
-		return err
-	}
-	c.sendMsg(fmt.Sprintf("added \"%v\" to the backup playlist", entry.Media.Title), nick)
+
+	c.sendMsg("added song to the backup playlist", nick)
 	return nil
 }
 
@@ -630,14 +643,4 @@ func ytIDfromURL(urlstring string) (id string, err error) {
 	}
 	id = id[3:]
 	return id, err
-}
-
-func (c *controller) addToBackup(entry opendj.QueueEntry) error {
-	for _, song := range c.backupSongs {
-		if song.Media.URL == entry.Media.URL {
-			return errors.New("entry already in backup list")
-		}
-	}
-	c.backupSongs = append(c.backupSongs, entry)
-	return nil
 }
