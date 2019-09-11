@@ -446,7 +446,7 @@ func (c *controller) addDedication(message string, nick string) {
 		return
 	}
 
-	dedication := strings.Replace(message, "-dedicate", "", -1)
+	dedication := strings.TrimSpace(strings.Replace(message, "-dedicate", "", -1))
 
 	entry, err := c.dj.EntryAtIndex(positions[0])
 	if err != nil {
