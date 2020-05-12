@@ -9,5 +9,5 @@ require (
 	github.com/Syfaro/haste-client v0.0.0-20150731062254-09b1fbfa3977
 	github.com/gorilla/websocket v1.4.0 // indirect
 	github.com/syfaro/haste-client v0.0.0-20150731062254-09b1fbfa3977 // indirect
-	google.golang.org/api v0.7.0
+	google.golang.org/api v0.24.0
 )
