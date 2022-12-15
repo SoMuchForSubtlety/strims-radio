@@ -1,0 +1,38 @@
+name: build and publish image
+on:
+  push:
+    branches: [ master ]
+jobs:
+  build:
+    name: Build and push multi-arch images
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [ amd64, arm64 ]
+    steps:
+    - uses: docker/setup-qemu-action@v2
+
+    - uses: actions/checkout@v2
+
+    - uses: redhat-actions/podman-login@v1
+      with:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+        registry: ghcr.io
+
+    - uses: redhat-actions/buildah-build@v2
+      id: build-image
+      with:
+        image: ghcr.io/SoMuchForSubtlety/strims-radio
+        tags: latest-${{ matrix.arch }}
+        arch: ${{ matrix.arch }}
+        oci: true
+        dockerfiles: |
+          ./Dockerfile
+
+    - uses: redhat-actions/push-to-registry@v2
+      with:
+        image: ${{ steps.build-image.outputs.image }}
+        tags: ${{ steps.build-image.outputs.tags }}
+        registry: ghcr.io
