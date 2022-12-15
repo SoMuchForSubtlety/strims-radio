@@ -1,14 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"math/rand"
-	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -22,7 +22,7 @@ import (
 	"github.com/SoMuchForSubtlety/fileupload"
 	"github.com/SoMuchForSubtlety/opendj"
 	"github.com/Syfaro/haste-client"
-	"google.golang.org/api/googleapi/transport"
+	"google.golang.org/api/option"
 	"google.golang.org/api/youtube/v3"
 )
 
@@ -114,15 +114,14 @@ func initController() (c *controller, err error) {
 	c.msgBuffer = make(chan outgoingMessage, 100)
 	c.haste = haste.NewHaste(hasteURL)
 
-	client := &http.Client{Transport: &transport.APIKey{Key: c.cfg.APIKey}}
-	c.ytServ, err = youtube.New(client)
+	c.ytServ, err = youtube.NewService(context.Background(), option.WithAPIKey(c.cfg.APIKey))
 	if err != nil {
 		return nil, err
 	}
 
 	var queue []opendj.QueueEntry
 	// load the saved playlist if there is one
-	file, err := ioutil.ReadFile(*queueSaveLocation)
+	file, err := os.ReadFile(*queueSaveLocation)
 	if err != nil {
 		log.Printf("[INFO] no previous playlist found: %v", err)
 	} else {
@@ -135,7 +134,7 @@ func initController() (c *controller, err error) {
 	}
 
 	// load update subscribers
-	file, err = ioutil.ReadFile(*subscriberSaveLocation)
+	file, err = os.ReadFile(*subscriberSaveLocation)
 	if err != nil {
 		log.Printf("[INFO] no user list found: %v", err)
 	} else {
@@ -148,7 +147,7 @@ func initController() (c *controller, err error) {
 	}
 
 	// load backup songs
-	file, err = ioutil.ReadFile(*backupSongsLocation)
+	file, err = os.ReadFile(*backupSongsLocation)
 	if err != nil {
 		log.Printf("[INFO] no backup song list found: %v", err)
 	} else {
@@ -169,6 +168,10 @@ func initController() (c *controller, err error) {
 
 	// Create a new sgg client
 	c.sgg, err = dggchat.New(";jwt=" + c.cfg.AuthToken)
+	if err != nil {
+		log.Fatalf("[ERROR] can't create client %v", err)
+	}
+
 	u, err := url.Parse(c.cfg.Address)
 	if err != nil {
 		log.Fatalf("[ERROR] can't parse url %v", err)
@@ -192,7 +195,7 @@ func readConfig(title string) (cfg config, err error) {
 	}
 	defer file.Close()
 
-	bv, err := ioutil.ReadAll(file)
+	bv, err := io.ReadAll(file)
 	if err != nil {
 		return cfg, err
 	}
@@ -240,7 +243,7 @@ func (c *controller) onPrivMessage(m dggchat.PrivateMessage, s *dggchat.Session)
 		c.addDedication(trimmedMsg, m.User.Nick)
 		return
 	} else if strings.Contains(trimmedMsg, "-addbackup") {
-		c.manuallyAddSongToBackup(trimmedMsg, m.User.Nick)
+		_ = c.manuallyAddSongToBackup(trimmedMsg, m.User.Nick)
 		return
 	} else if ytURL.Match([]byte(trimmedMsg)) {
 		c.addYTlink(m)
@@ -306,7 +309,7 @@ func (c *controller) addYTlink(m dggchat.PrivateMessage) {
 	}
 
 	c.dj.AddEntry(entry)
-	saveStruct(c.dj.Queue(), *queueSaveLocation)
+	_ = saveStruct(c.dj.Queue(), *queueSaveLocation)
 	c.playlistDirty = true
 
 	durations := c.dj.DurationUntilUser(m.User.Nick)
@@ -404,7 +407,7 @@ func (c *controller) addUserToUpdates(nick string) {
 		c.sendMsg("You will no longer get notifications.", nick)
 		c.updateSubscribers.remove(nick)
 	}
-	saveStruct(&c.updateSubscribers, *subscriberSaveLocation)
+	_ = saveStruct(&c.updateSubscribers, *subscriberSaveLocation)
 }
 
 func (c *controller) removeItem(message string, nick dggchat.User) {
@@ -432,11 +435,9 @@ func (c *controller) removeItem(message string, nick dggchat.User) {
 		c.sendMsg("index out of range", nick.Nick)
 		return
 	}
-	saveStruct(c.dj.Queue(), *queueSaveLocation)
+	_ = saveStruct(c.dj.Queue(), *queueSaveLocation)
 	c.playlistDirty = true
 	c.sendMsg("Successfully removed item at index", nick.Nick)
-
-	return
 }
 
 func (c *controller) addDedication(message string, nick string) {
@@ -492,7 +493,7 @@ func (c *controller) uploadString(text string) (url string, err error) {
 		url = hasteURL + "/raw/" + res.response.Key
 	case <-time.After(1 * time.Second):
 		// TODO: find a better way to do this
-		err = ioutil.WriteFile(tmpFile, []byte(text), 0644)
+		err = os.WriteFile(tmpFile, []byte(text), 0o644)
 		if err != nil {
 			return url, err
 		}
@@ -516,7 +517,7 @@ func (c *controller) messageSender() {
 	for {
 		// TODO: verify the message was sent
 		msg := <-c.msgBuffer
-		c.sgg.SendPrivateMessage(msg.nick, msg.message)
+		_ = c.sgg.SendPrivateMessage(msg.nick, msg.message)
 		log.Printf("[MSG] message sent to %v: %v", msg.nick, msg.message)
 		time.Sleep(time.Millisecond * 450)
 	}
@@ -545,7 +546,7 @@ func (c *controller) songOver(entry opendj.QueueEntry, err error) {
 	log.Println("[INFO] 🛑 Done Playing")
 
 	queue := c.dj.Queue()
-	saveStruct(queue, *queueSaveLocation)
+	_ = saveStruct(queue, *queueSaveLocation)
 
 	if len(queue) <= 0 && len(c.backupSongs) > 0 {
 		c.dj.AddEntry(c.backupSongs[rand.Intn(len(c.backupSongs))])
@@ -554,7 +555,7 @@ func (c *controller) songOver(entry opendj.QueueEntry, err error) {
 	likes := len(c.likes.Users)
 	id, _ := ytIDfromURL(entry.Media.URL)
 
-	c.saveSongToBackup(id)
+	_ = c.saveSongToBackup(id)
 	if likes > 0 {
 		ppl := "people"
 		if likes == 1 {
@@ -579,7 +580,7 @@ func (c *controller) saveSongToBackup(id string) error {
 	}
 
 	c.backupSongs = append(c.backupSongs, entry)
-	saveStruct(c.backupSongs, *backupSongsLocation)
+	_ = saveStruct(c.backupSongs, *backupSongsLocation)
 	return nil
 }
 
@@ -592,7 +593,7 @@ func saveStruct(v interface{}, title string) error {
 	if err != nil {
 		return err
 	}
-	err = ioutil.WriteFile(title, file, 0644)
+	err = os.WriteFile(title, file, 0o644)
 	if err != nil {
 		return err
 	}
@@ -600,7 +601,7 @@ func saveStruct(v interface{}, title string) error {
 }
 
 func (c *controller) createYTQueueEntry(id string, owner string) (entry opendj.QueueEntry, err error) {
-	res, err := c.ytServ.Videos.List("id,snippet,contentDetails").Id(id).Do()
+	res, err := c.ytServ.Videos.List([]string{"id", "snippet", "contentDetails"}).Id(id).Do()
 	if err != nil {
 		return entry, err
 	}
