@@ -10,11 +10,7 @@ import (
 )
 
 func fmtDuration(d time.Duration) string {
-	d = d.Round(time.Second)
-	minutes := d / time.Minute
-	d -= minutes * time.Minute
-	seconds := d / time.Second
-	return fmt.Sprintf("%02d:%02d", minutes, seconds)
+	return d.String()
 }
 
 func durationBar(width int, fraction time.Duration, total time.Duration) string {
