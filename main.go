@@ -74,7 +74,6 @@ const (
 
 func main() {
 	flag.Parse()
-	rand.Seed(time.Now().Unix())
 	cont, err := initController()
 	if err != nil {
 		log.Fatalf("[ERROR] could not initialize controller: %v", err)
@@ -324,7 +323,7 @@ func (c *controller) addYTlink(m dggchat.PrivateMessage) {
 	}
 
 	c.sendMsg(fmt.Sprintf("Added your request '%v' to the queue. %v", entry.Media.Title, response), m.User.Nick)
-	log.Printf("Added song: '%v' for %v", entry.Media.Title, entry.Owner)
+	log.Printf("[INFO] Added song: '%v' for %v", entry.Media.Title, entry.Owner)
 }
 
 func (c *controller) sendCurrentSong(nick string) {
@@ -411,13 +410,18 @@ func (c *controller) addUserToUpdates(nick string) {
 }
 
 func (c *controller) removeItem(message string, nick dggchat.User) {
+	fields := strings.Fields(message)
+	if len(fields) < 2 {
+		c.sendMsg("Index out of range", nick.Nick)
+		return
+	}
 	intString := strings.Fields(message)[1]
 	index, err := strconv.Atoi(intString)
-	index--
 	if err != nil {
 		c.sendMsg("please enter a valid integer", nick.Nick)
 		return
 	}
+	index--
 
 	entry, err := c.dj.EntryAtIndex(index)
 	if err != nil {
