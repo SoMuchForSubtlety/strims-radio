@@ -68,7 +68,7 @@ var (
 const (
 	hasteURL   = "https://hastebin.com"
 	ytURLStart = "https://www.youtube.com/watch?v="
-	uguuURL    = "https://uguu.se/api.php?d=upload-tool"
+	uploadURL  = "https://st.pepog.com"
 	tmpFile    = "tmp.txt"
 )
 
@@ -249,7 +249,7 @@ func (c *controller) onPrivMessage(m dggchat.PrivateMessage, s *dggchat.Session)
 		return
 	}
 
-	c.sendMsg("unknown command", m.User.Nick)
+	c.sendMsg("unknown command: see https://github.com/SoMuchForSubtlety/strims-radio?tab=readme-ov-file#commands for help", m.User.Nick)
 }
 
 func onError(e string, s *dggchat.Session) {
@@ -479,35 +479,20 @@ func (c *controller) isMod(nick string) bool {
 
 func (c *controller) uploadString(text string) (url string, err error) {
 	var file *os.File
-
-	type resp struct {
-		response *haste.Response
-		er       error
+	err = os.WriteFile(tmpFile, []byte(text), 0o644)
+	if err != nil {
+		return url, err
 	}
-
-	c1 := make(chan resp)
-	go func() {
-		hasteResp, err := c.haste.UploadString(text)
-		c1 <- resp{response: hasteResp, er: err}
-	}()
-
-	select {
-	case res := <-c1:
-		err = res.er
-		url = hasteURL + "/raw/" + res.response.Key
-	case <-time.After(1 * time.Second):
-		// TODO: find a better way to do this
-		err = os.WriteFile(tmpFile, []byte(text), 0o644)
-		if err != nil {
-			return url, err
-		}
-		file, err = os.Open(tmpFile)
-		if err != nil {
-			return url, err
-		}
-		url, err = fileupload.UploadToHost(uguuURL, file)
+	file, err = os.Open(tmpFile)
+	if err != nil {
+		return url, err
 	}
-
+	url, err = fileupload.UploadToHost(uploadURL, file)
+	if err != nil {
+		return url, err
+	}
+	// st.pepog.com returns two urls, take the first one
+	url = strings.SplitAfter(url, "txt")[0]
 	return url, err
 }
 
