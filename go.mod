@@ -7,7 +7,7 @@ toolchain go1.22.1
 require (
 	github.com/MemeLabs/dggchat v0.0.0-20231206135306-915d599a11b8
 	github.com/SoMuchForSubtlety/fileupload v0.0.0-20190501234410-5cee83efce0d
-	github.com/SoMuchForSubtlety/opendj v0.0.0-20221221092801-efaa08d234bb
+	github.com/SoMuchForSubtlety/opendj v0.0.0-20240324113325-7c7c35e137cb
 	github.com/Syfaro/haste-client v0.0.0-20150731062254-09b1fbfa3977
 	google.golang.org/api v0.171.0
 )

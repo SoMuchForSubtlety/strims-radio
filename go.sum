@@ -19,6 +19,8 @@ github.com/SoMuchForSubtlety/fileupload v0.0.0-20190501234410-5cee83efce0d h1:w/
 github.com/SoMuchForSubtlety/fileupload v0.0.0-20190501234410-5cee83efce0d/go.mod h1:V9UyAKunuViDBcrQDqXsrJ9V1/ZuGMyxSLqiNI/iU34=
 github.com/SoMuchForSubtlety/opendj v0.0.0-20221221092801-efaa08d234bb h1:gSIKQNBD5SzG9eCXbSfm49UsnR1iGkNX44du4T9y3tE=
 github.com/SoMuchForSubtlety/opendj v0.0.0-20221221092801-efaa08d234bb/go.mod h1:qiB8ca/hqAY/Uf95rcYLQ5chpaBnL+EkKg8qy5nPkW4=
+github.com/SoMuchForSubtlety/opendj v0.0.0-20240324113325-7c7c35e137cb h1:9zghhYcdE11Ak7a6jAbNe/cvyhnFGFicHtD7bPbdz1E=
+github.com/SoMuchForSubtlety/opendj v0.0.0-20240324113325-7c7c35e137cb/go.mod h1:cVWugikY2gOSTWx2QR8T7c2m2ltEyy8RBuWPPdLn6Jk=
 github.com/Syfaro/haste-client v0.0.0-20150731062254-09b1fbfa3977 h1:TNSlqenJvcSPpBafY50g0RD/eVrIUj2i6BTIiRqM9y0=
 github.com/Syfaro/haste-client v0.0.0-20150731062254-09b1fbfa3977/go.mod h1:+XuCpHuIAbb/5Z9KW7rOZ5N85++Yck9u+VkrzE4GA6w=
 github.com/census-instrumentation/opencensus-proto v0.2.1/go.mod h1:f6KPmirojxKA12rnyqOA5BBL4O983OfeGPqjHWSTneU=
