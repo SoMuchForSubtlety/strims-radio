@@ -21,7 +21,6 @@ import (
 	"github.com/MemeLabs/dggchat"
 	"github.com/SoMuchForSubtlety/fileupload"
 	"github.com/SoMuchForSubtlety/opendj"
-	"github.com/Syfaro/haste-client"
 	"google.golang.org/api/option"
 	"google.golang.org/api/youtube/v3"
 )
@@ -40,8 +39,6 @@ type controller struct {
 	sgg       *dggchat.Session
 	msgBuffer chan outgoingMessage
 	dj        *opendj.Dj
-
-	haste *haste.Haste
 
 	playlistLink  string
 	playlistDirty bool
@@ -66,7 +63,6 @@ var (
 )
 
 const (
-	hasteURL   = "https://hastebin.com"
 	ytURLStart = "https://www.youtube.com/watch?v="
 	uploadURL  = "https://st.pepog.com"
 	tmpFile    = "tmp.txt"
@@ -91,13 +87,24 @@ func main() {
 		cont.dj.AddEntry(cont.backupSongs[rand.Intn(len(cont.backupSongs))])
 	}
 
-	go cont.dj.Play(cont.cfg.Rtmp)
+	// Set up signal handling for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	cont.messageSender()
-	// Wait for ctr-C to shut down
+	// Wait for ctr-C to shut down in a separate goroutine
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT)
-	<-sc
+	go func() {
+		<-sc
+		log.Println("[INFO] Received interrupt signal, shutting down...")
+		cancel() // Cancel the context when interrupt is received
+	}()
+
+	// Start the DJ with the context
+	go cont.dj.Play(ctx, cont.cfg.Rtmp)
+
+	// Run message sender until context is done
+	cont.messageSender(ctx)
 }
 
 func initController() (c *controller, err error) {
@@ -111,7 +118,6 @@ func initController() (c *controller, err error) {
 	}
 
 	c.msgBuffer = make(chan outgoingMessage, 100)
-	c.haste = haste.NewHaste(hasteURL)
 
 	c.ytServ, err = youtube.NewService(context.Background(), option.WithAPIKey(c.cfg.APIKey))
 	if err != nil {
@@ -232,6 +238,9 @@ func (c *controller) onPrivMessage(m dggchat.PrivateMessage, s *dggchat.Session)
 	case "-like":
 		c.likeSong(m.User.Nick)
 		return
+	case "-skip":
+		c.skipSong(m.User)
+		return
 	default:
 	}
 
@@ -254,6 +263,28 @@ func (c *controller) onPrivMessage(m dggchat.PrivateMessage, s *dggchat.Session)
 
 func onError(e string, s *dggchat.Session) {
 	log.Printf("[ERROR] error from ws: %s", e)
+}
+
+func (c *controller) skipSong(user dggchat.User) {
+	// Check if the user is a moderator
+	if !c.isMod(user.Nick) && !user.HasFeature("moderator") {
+		c.sendMsg("You don't have permission to skip songs", user.Nick)
+		return
+	}
+
+	// Get current song to provide feedback
+	song, _, err := c.dj.CurrentlyPlaying()
+	if err != nil {
+		c.sendMsg("There is no song currently playing", user.Nick)
+		return
+	}
+
+	// Skip the current song
+	c.dj.Skip()
+
+	// Notify the user
+	c.sendMsg(fmt.Sprintf("Skipped '%v'", song.Media.Title), user.Nick)
+	log.Printf("[INFO] %s skipped song: %s", user.Nick, song.Media.Title)
 }
 
 func (c *controller) addYTlink(m dggchat.PrivateMessage) {
@@ -502,13 +533,18 @@ func (c *controller) sendMsg(message string, nick string) {
 	}
 }
 
-func (c *controller) messageSender() {
+func (c *controller) messageSender(ctx context.Context) {
 	for {
-		// TODO: verify the message was sent
-		msg := <-c.msgBuffer
-		_ = c.sgg.SendPrivateMessage(msg.nick, msg.message)
-		log.Printf("[MSG] message sent to %v: %v", msg.nick, msg.message)
-		time.Sleep(time.Millisecond * 450)
+		select {
+		case <-ctx.Done():
+			log.Println("[INFO] Message sender shutting down")
+			return
+		case msg := <-c.msgBuffer:
+			// TODO: verify the message was sent
+			_ = c.sgg.SendPrivateMessage(msg.nick, msg.message)
+			log.Printf("[MSG] message sent to %v: %v", msg.nick, msg.message)
+			time.Sleep(time.Millisecond * 450)
+		}
 	}
 }
 

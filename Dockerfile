@@ -1,4 +1,4 @@
-FROM docker.io/library/golang:1.19-buster as builder
+FROM docker.io/library/golang:1.24-buster as builder
 ENV GO111MODULE=on
 WORKDIR /code
 ADD go.mod go.sum /code/
